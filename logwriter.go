@@ -10,6 +10,8 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
 )
 
+// LogWriter implements the io.Writer interface for the purposes of sending data
+// to the OCI Logging service.
 type LogWriter struct {
 	Client  loggingingestion.LoggingClient
 	LogId   *string

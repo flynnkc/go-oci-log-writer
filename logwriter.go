@@ -21,6 +21,7 @@ type LogWriter struct {
 	Type    *string
 	buffer  chan loggingingestion.LogEntry
 	once    sync.Once
+	closed  bool // Prevent further writes after Close called
 }
 
 type LogWriterDetails struct {
@@ -68,6 +69,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		Source:  cfg.Source,
 		Subject: cfg.Subject,
 		Type:    cfg.Type,
+		closed:  false,
 	}
 
 	return &lw, nil
@@ -93,6 +95,11 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 		},
 	}
 
+	// Don't write to closed logger
+	if lw.closed {
+		return 0, errors.New("error writer closed")
+	}
+
 	lw.buffer <- le
 
 	// Check if channel is full and flush if true. There is a possibility that
@@ -112,9 +119,10 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 // cleanup for an exiting program. Uses sync to prevent multiple closes on
 // the buffer channel.
 func (lw *LogWriter) Close() {
-	lw.flush()
 	// Politely close the buffer to prevent panic
 	lw.once.Do(func() {
+		lw.closed = true
+		lw.flush()
 		close(lw.buffer)
 	})
 }

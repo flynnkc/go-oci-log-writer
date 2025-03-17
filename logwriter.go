@@ -10,6 +10,14 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
 )
 
+var (
+	ErrNoLogId      = errors.New("error Log ID not specified")
+	ErrNoLogSource  = errors.New("error Log Source not specified")
+	ErrNoLogType    = errors.New("error Log Type not specified")
+	ErrLogEntrySize = errors.New("error log entry greater than 1 megabyte")
+	ErrClosed       = errors.New("error log writer closed")
+)
+
 // LogWriter implements the io.Writer interface for the purposes of sending data
 // to the OCI Logging service.
 type LogWriter struct {
@@ -40,13 +48,15 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 
 	// Validate LogWriterDetails
 	if cfg.LogId == nil {
-		return nil, errors.New("error Log ID not specified")
+		return nil, ErrNoLogId
+	} else if *cfg.LogId == "" {
+		return nil, ErrNoLogId
 	}
 	if cfg.Source == nil {
-		return nil, errors.New("error Log Source not specified")
+		return nil, ErrNoLogSource
 	}
 	if cfg.Type == nil {
-		return nil, errors.New("error Log Type not specified")
+		return nil, ErrNoLogType
 	}
 	// Default buffer size of 200
 	if cfg.BufferSize == nil {
@@ -79,7 +89,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 func (lw *LogWriter) Write(p []byte) (int, error) {
 	// Max 1 MB per entry
 	if len(p) > 1048576 {
-		return 0, errors.New("error log entry greater than 1 megabyte")
+		return 0, ErrLogEntrySize
 	}
 
 	// Random UUID allocation for each log entry
@@ -95,7 +105,7 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 
 	// Don't write to closed logger
 	if lw.closed {
-		return 0, errors.New("error writer closed")
+		return 0, ErrClosed
 	}
 	lw.buffer <- le
 
@@ -117,13 +127,16 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 // the buffer channel. Implements io.Closer interface.
 func (lw *LogWriter) Close() error {
 	if lw.closed {
-		return errors.New("error LogWriter already closed")
+		return ErrClosed
 	}
 
 	lw.closed = true
-	lw.flush()
 
-	return nil
+	if len(lw.buffer) == 0 {
+		return nil
+	}
+
+	return lw.flush()
 }
 
 // Flush writes the logs to the OCI Logging service. Flush empties the buffer and
@@ -131,8 +144,8 @@ func (lw *LogWriter) Close() error {
 // requests.
 func (lw *LogWriter) flush() error {
 	var entries []loggingingestion.LogEntry
-	for entry := range lw.buffer {
-		entries = append(entries, entry)
+	for len(lw.buffer) > 0 {
+		entries = append(entries, <-lw.buffer)
 	}
 
 	batch := loggingingestion.LogEntryBatch{

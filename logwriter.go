@@ -152,6 +152,7 @@ func (lw *LogWriter) flush() error {
 		Entries: entries,
 		Type:    lw.Type,
 		Subject: lw.Subject,
+		Source:  lw.Source,
 		Defaultlogentrytime: &common.SDKTime{
 			Time: time.Now().UTC(), // Tz most commonly used for cloud resources
 		},

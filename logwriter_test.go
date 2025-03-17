@@ -12,8 +12,9 @@ import (
 var (
 	details lw.LogWriterDetails = lw.LogWriterDetails{
 		Provider:   common.DefaultConfigProvider(),
-		Source:     common.String("Testing"),
-		Type:       common.String("Testing.test"),
+		Source:     common.String("Source"),
+		Type:       common.String("Type"),
+		Subject:    common.String("Subject"),
 		BufferSize: common.Int(2),
 	}
 )
@@ -97,10 +98,33 @@ func TestWrite(t *testing.T) {
 			t.Fail()
 		}
 
-		s = []byte("write test 2")
 		p, err = writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on second write: %v", err)
+		} else if p != len(s) {
+			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
+			t.Fail()
+		}
+	})
+
+	// Remove mandatory fields and see what happens
+	t.Run("Write=2", func(t *testing.T) {
+		writer.Source = nil
+		writer.Subject = nil
+		writer.Type = nil
+
+		s := []byte("write test 2")
+		p, err := writer.Write(s)
+		if err != nil {
+			t.Fatalf("error on third write: %v", err)
+		} else if p != len(s) {
+			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
+			t.Fail()
+		}
+
+		p, err = writer.Write(s)
+		if err != nil {
+			t.Fatalf("error on third write: %v", err)
 		} else if p != len(s) {
 			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
 			t.Fail()
@@ -128,17 +152,6 @@ func TestClose(t *testing.T) {
 		err := writer.Close()
 		if !errors.Is(err, lw.ErrClosed) {
 			t.Errorf("Failed second close: %v", err)
-		}
-	})
-
-	// Calls flush
-	t.Run("Close=3", func(t *testing.T) {
-		writer, _ = lw.New(details)
-		writer.Write([]byte("foobar"))
-
-		err := writer.Close()
-		if err != nil {
-			t.Errorf("Failed to close: %v", err)
 		}
 	})
 }

@@ -2,6 +2,8 @@
 
 This repository creates a buffered log that satisfies the io.Writer interface to allow for logging to a Custom Log in Oracle Cloud Infrastructure.
 
+For use primarily as an example.
+
 ## Useage
 
 ```go
@@ -16,7 +18,8 @@ import (
 )
 
 func main() {
-    provider, _ := identity.NewIdentityClientWithConfigurationProvider(common.DefaultConfigProvider())
+    provider, _ := identity.NewIdentityClientWithConfigurationProvider(
+        common.DefaultConfigProvider())
 
     details := olog.LogWriterDetails {
         LogId: common.String("abc...xyz"),
@@ -29,6 +32,8 @@ func main() {
     if err != nil {
         // do something
     }
+    // Defer close to flush buffer & prevent additional entries
+    defer writer.Close()
 
     logger := log.New(writer, "", log.Lshortfile)
     logger.Println("this is a useful log entry")

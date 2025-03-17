@@ -3,6 +3,7 @@ package goocilogwriter
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,44 +20,84 @@ type LogWriter struct {
 	Subject *string
 	Type    *string
 	buffer  chan loggingingestion.LogEntry
+	once    sync.Once
+}
+
+type LogWriterDetails struct {
+	// Log OCID
+	LogId    *string                      `mandatory:"true" name:"logId"`
+	Provider common.ConfigurationProvider `mandatory:"true" name:"provider"`
+	// Source of log. Needs to be a string. (ex. ServerA)
+	Source *string `mandatory:"true" name:"source"`
+	// Type of log. (ex. ServerA.AccessLog)
+	Type *string `mandatory:"true" name:"type"`
+	// Subject for further specification if desired
+	Subject    *string `mandatory:"false" name:"subject"`
+	BufferSize *int    `mandatory:"false" name:"buffersize"`
 }
 
 // New returns a pointer to the LogWriter or an error
-func New(provider common.ConfigurationProvider, logType, logSrc, logSubject string,
-	bufferSize int) (*LogWriter, error) {
+func New(cfg LogWriterDetails) (*LogWriter, error) {
 
-	client, err := loggingingestion.NewLoggingClientWithConfigurationProvider(provider)
+	// Validate LogWriterDetails
+	if cfg.LogId == nil {
+		return nil, errors.New("error Log ID not specified")
+	}
+	if cfg.Source == nil {
+		return nil, errors.New("error Log Source not specified")
+	}
+	if cfg.Type == nil {
+		return nil, errors.New("error Log Type not specified")
+	}
+	// Default buffer size of 200
+	if cfg.BufferSize == nil {
+		i := 200
+		cfg.BufferSize = &i
+	}
+
+	// provider can be user, instance, workload, or resource principal for flexibility
+	client, err := loggingingestion.NewLoggingClientWithConfigurationProvider(cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
 
 	lw := LogWriter{
-		buffer:  make(chan loggingingestion.LogEntry, bufferSize),
+		buffer:  make(chan loggingingestion.LogEntry, *cfg.BufferSize),
 		Client:  client,
-		Source:  &logSrc,
-		Subject: &logSubject,
-		Type:    &logType,
+		LogId:   cfg.LogId,
+		Source:  cfg.Source,
+		Subject: cfg.Subject,
+		Type:    cfg.Type,
 	}
 
 	return &lw, nil
 }
 
-// Write implements the io.Writer interface.
+// Write implements the io.Writer interface. Writes a single log entry with slice
+// of byte p. Uses buffered output to reduce network traffic and API requests.
+// Returns the length of data written and an error for checking.
 func (lw *LogWriter) Write(p []byte) (int, error) {
+	// Max 1 MB per entry
+	if len(p) > 1048576 {
+		return 0, errors.New("error log entry greater than 1 megabyte")
+	}
 
+	// Random UUID allocation for each log entry
 	id, _ := uuid.NewRandom()
 
 	le := loggingingestion.LogEntry{
 		Data: common.String(string(p)),
 		Id:   common.String(id.String()),
 		Time: &common.SDKTime{
-			Time: time.Now().UTC(),
+			Time: time.Now().UTC(), // Tz most commonly used for cloud resources
 		},
 	}
 
 	lw.buffer <- le
 
-	// Check if channel is full and flush if true
+	// Check if channel is full and flush if true. There is a possibility that
+	// more entries than the total buffer size are created if there are entries
+	// blocked or appended to the channel as it's being flushed.
 	if len(lw.buffer) == cap(lw.buffer) {
 		err := lw.flush()
 		if err != nil {
@@ -68,13 +109,19 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 }
 
 // Close flushes the buffer and closes the channel. Should be called in the
-// cleanup for an exiting program.
+// cleanup for an exiting program. Uses sync to prevent multiple closes on
+// the buffer channel.
 func (lw *LogWriter) Close() {
 	lw.flush()
-	close(lw.buffer)
+	// Politely close the buffer to prevent panic
+	lw.once.Do(func() {
+		close(lw.buffer)
+	})
 }
 
-// Flush writes the logs to the OCI Logging service
+// Flush writes the logs to the OCI Logging service. Flush empties the buffer and
+// sends collected log entries to OCI as a single batch. Returns an error on bad
+// requests.
 func (lw *LogWriter) flush() error {
 	var entries []loggingingestion.LogEntry
 	for entry := range lw.buffer {
@@ -86,12 +133,12 @@ func (lw *LogWriter) flush() error {
 		Type:    lw.Type,
 		Subject: lw.Subject,
 		Defaultlogentrytime: &common.SDKTime{
-			Time: time.Now().UTC(),
+			Time: time.Now().UTC(), // Tz most commonly used for cloud resources
 		},
 	}
 
 	details := loggingingestion.PutLogsDetails{
-		Specversion:     common.String("1.0"),
+		Specversion:     common.String("1.0"), // Mandatory value per SKD docs
 		LogEntryBatches: []loggingingestion.LogEntryBatch{batch},
 	}
 

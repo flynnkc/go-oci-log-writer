@@ -3,7 +3,6 @@ package goocilogwriter
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,21 +19,20 @@ type LogWriter struct {
 	Subject *string
 	Type    *string
 	buffer  chan loggingingestion.LogEntry
-	once    sync.Once
 	closed  bool // Prevent further writes after Close called
 }
 
 type LogWriterDetails struct {
 	// Log OCID
-	LogId    *string                      `mandatory:"true" name:"logId"`
-	Provider common.ConfigurationProvider `mandatory:"true" name:"provider"`
+	LogId    *string                      `mandatory:"true" json:"logId"`
+	Provider common.ConfigurationProvider `mandatory:"true" json:"provider"`
 	// Source of log. Needs to be a string. (ex. ServerA)
-	Source *string `mandatory:"true" name:"source"`
+	Source *string `mandatory:"true" json:"source"`
 	// Type of log. (ex. ServerA.AccessLog)
-	Type *string `mandatory:"true" name:"type"`
+	Type *string `mandatory:"true" json:"type"`
 	// Subject for further specification if desired
-	Subject    *string `mandatory:"false" name:"subject"`
-	BufferSize *int    `mandatory:"false" name:"buffersize"`
+	Subject    *string `mandatory:"false" json:"subject"`
+	BufferSize *int    `mandatory:"false" json:"buffersize"`
 }
 
 // New returns a pointer to the LogWriter or an error
@@ -99,7 +97,6 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 	if lw.closed {
 		return 0, errors.New("error writer closed")
 	}
-
 	lw.buffer <- le
 
 	// Check if channel is full and flush if true. There is a possibility that
@@ -117,14 +114,16 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 
 // Close flushes the buffer and closes the channel. Should be called in the
 // cleanup for an exiting program. Uses sync to prevent multiple closes on
-// the buffer channel.
-func (lw *LogWriter) Close() {
-	// Politely close the buffer to prevent panic
-	lw.once.Do(func() {
-		lw.closed = true
-		lw.flush()
-		close(lw.buffer)
-	})
+// the buffer channel. Implements io.Closer interface.
+func (lw *LogWriter) Close() error {
+	if lw.closed {
+		return errors.New("error LogWriter already closed")
+	}
+
+	lw.closed = true
+	lw.flush()
+
+	return nil
 }
 
 // Flush writes the logs to the OCI Logging service. Flush empties the buffer and

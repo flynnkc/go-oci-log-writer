@@ -28,6 +28,7 @@ type LogWriter struct {
 	Type    *string
 	buffer  chan loggingingestion.LogEntry
 	closed  bool // Prevent further writes after Close called
+	done    chan bool
 }
 
 type LogWriterDetails struct {
@@ -78,7 +79,10 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		Subject: cfg.Subject,
 		Type:    cfg.Type,
 		closed:  false,
+		done:    make(chan bool),
 	}
+
+	go lw.worker()
 
 	return &lw, nil
 }
@@ -109,16 +113,6 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 	}
 	lw.buffer <- le
 
-	// Check if channel is full and flush if true. There is a possibility that
-	// more entries than the total buffer size are created if there are entries
-	// blocked or appended to the channel as it's being flushed.
-	if len(lw.buffer) == cap(lw.buffer) {
-		err := lw.flush()
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	return len(p), nil
 }
 
@@ -132,21 +126,34 @@ func (lw *LogWriter) Close() error {
 
 	lw.closed = true
 
-	if len(lw.buffer) == 0 {
-		return nil
-	}
+	lw.done <- true
 
-	return lw.flush()
+	return nil
 }
 
-// Flush writes the logs to the OCI Logging service. Flush empties the buffer and
+func (lw *LogWriter) worker() {
+	var entries []loggingingestion.LogEntry
+	bufferSize := cap(lw.buffer)
+
+	for {
+		select {
+		case entry := <-lw.buffer:
+			entries = append(entries, entry)
+			if len(entries) >= bufferSize {
+				lw.flush(entries)
+				entries = nil
+			}
+		case <-lw.done:
+			lw.flush(entries)
+			return
+		}
+	}
+}
+
+// Worker writes the logs to the OCI Logging service. Flush empties the buffer and
 // sends collected log entries to OCI as a single batch. Returns an error on bad
 // requests.
-func (lw *LogWriter) flush() error {
-	var entries []loggingingestion.LogEntry
-	for len(lw.buffer) > 0 {
-		entries = append(entries, <-lw.buffer)
-	}
+func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 
 	batch := loggingingestion.LogEntryBatch{
 		Entries: entries,

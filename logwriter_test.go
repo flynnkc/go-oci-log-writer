@@ -89,7 +89,7 @@ func TestWrite(t *testing.T) {
 	}
 
 	t.Run("Write=1", func(t *testing.T) {
-		s := []byte("write test 1")
+		s := []byte("Write Test 1")
 		p, err := writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on first write: %v", err)
@@ -113,7 +113,7 @@ func TestWrite(t *testing.T) {
 		writer.Subject = nil
 		writer.Type = nil
 
-		s := []byte("write test 2")
+		s := []byte("Write Test 2")
 		p, err := writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on third write: %v", err)
@@ -152,6 +152,27 @@ func TestClose(t *testing.T) {
 		err := writer.Close()
 		if !errors.Is(err, lw.ErrClosed) {
 			t.Errorf("Failed second close: %v", err)
+		}
+	})
+
+	// Should see all 3 messages after this test
+	t.Run("Close=3", func(t *testing.T) {
+		// New open writer
+		writer, err = lw.New(details)
+		if err != nil {
+			t.Fatalf("error initializing writer: %v", err)
+		}
+
+		for _, s := range []string{"1 of 3", "2 of 3", "3 of 3"} {
+			p, err := writer.Write([]byte("Close Test 3: Message " + s))
+			if p == 0 || err != nil {
+				t.Fail()
+			}
+		}
+
+		err := writer.Close()
+		if err != nil {
+			t.Errorf("Failed third close: %v", err)
 		}
 	})
 }

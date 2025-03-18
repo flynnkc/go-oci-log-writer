@@ -3,6 +3,7 @@ package goocilogwriter
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,9 +27,10 @@ type LogWriter struct {
 	Source  *string
 	Subject *string
 	Type    *string
-	buffer  chan loggingingestion.LogEntry
 	closed  bool // Prevent further writes after Close called
+	buffer  chan loggingingestion.LogEntry
 	done    chan bool
+	flushed chan bool
 }
 
 type LogWriterDetails struct {
@@ -80,6 +82,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		Type:    cfg.Type,
 		closed:  false,
 		done:    make(chan bool),
+		flushed: make(chan bool),
 	}
 
 	go lw.worker()
@@ -124,15 +127,20 @@ func (lw *LogWriter) Close() error {
 		return ErrClosed
 	}
 
+	// Close up shop
 	lw.closed = true
-
 	lw.done <- true
+	<-lw.flushed // Wait for logs to finish flushing
 
 	return nil
 }
 
+// Worker runs as a goroutine and receives logs, flushing when buffer is reached.
+// Since sending logs to OCI is a slow network operation, this should happen
+// concurrently with other log processing to prevent blocking.
 func (lw *LogWriter) worker() {
 	var entries []loggingingestion.LogEntry
+	var err error
 	bufferSize := cap(lw.buffer)
 
 	for {
@@ -140,17 +148,26 @@ func (lw *LogWriter) worker() {
 		case entry := <-lw.buffer:
 			entries = append(entries, entry)
 			if len(entries) >= bufferSize {
-				lw.flush(entries)
+				err = lw.flush(entries)
+				if err != nil {
+					handleWriteErr(err, entries)
+				}
 				entries = nil
 			}
 		case <-lw.done:
-			lw.flush(entries)
+			if len(entries) > 0 {
+				err = lw.flush(entries)
+				if err != nil {
+					handleWriteErr(err, entries)
+				}
+			}
+			lw.flushed <- true
 			return
 		}
 	}
 }
 
-// Worker writes the logs to the OCI Logging service. Flush empties the buffer and
+// Flush writes the logs to the OCI Logging service. Flush empties the buffer and
 // sends collected log entries to OCI as a single batch. Returns an error on bad
 // requests.
 func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
@@ -183,4 +200,9 @@ func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 	}
 
 	return nil
+}
+
+func handleWriteErr(err error, entries []loggingingestion.LogEntry) {
+	log.Println("error flushing logs to OCI Logging", err)
+	log.Printf("entries: %v\n", entries)
 }

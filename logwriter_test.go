@@ -9,6 +9,12 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
+/*
+	NOTE: Environment variables OCI_LOG_ID must be set with valid Log OCID
+		  before testing.
+
+*/
+
 var (
 	details lw.LogWriterDetails = lw.LogWriterDetails{
 		Provider:   common.DefaultConfigProvider(),

@@ -70,7 +70,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		cfg.BufferSize = &i
 	}
 	if cfg.ErrorLog == nil {
-		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error", log.Lshortfile)
+		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error", log.LstdFlags|log.LUTC)
 	}
 
 	// provider can be user, instance, workload, or resource principal for flexibility

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type LogWriter struct {
 	Source  *string
 	Subject *string
 	Type    *string
+	log     *log.Logger
 	closed  bool // Prevent further writes after Close called
 	buffer  chan loggingingestion.LogEntry
 	done    chan bool
@@ -42,8 +44,9 @@ type LogWriterDetails struct {
 	// Type of log. (ex. ServerA.AccessLog)
 	Type *string `mandatory:"true" json:"type"`
 	// Subject for further specification if desired
-	Subject    *string `mandatory:"false" json:"subject"`
-	BufferSize *int    `mandatory:"false" json:"buffersize"`
+	Subject    *string     `mandatory:"false" json:"subject"`
+	BufferSize *int        `mandatory:"false" json:"buffersize"`
+	ErrorLog   *log.Logger `mandatory:"false"`
 }
 
 // New returns a pointer to the LogWriter or an error
@@ -66,6 +69,9 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		i := 200
 		cfg.BufferSize = &i
 	}
+	if cfg.ErrorLog == nil {
+		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error", log.Lshortfile)
+	}
 
 	// provider can be user, instance, workload, or resource principal for flexibility
 	client, err := loggingingestion.NewLoggingClientWithConfigurationProvider(cfg.Provider)
@@ -80,6 +86,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		Source:  cfg.Source,
 		Subject: cfg.Subject,
 		Type:    cfg.Type,
+		log:     cfg.ErrorLog,
 		closed:  false,
 		done:    make(chan bool),
 		flushed: make(chan bool),
@@ -150,7 +157,7 @@ func (lw *LogWriter) worker(done, flushed chan bool) {
 			if len(entries) >= bufferSize {
 				err = lw.flush(entries)
 				if err != nil {
-					handleWriteErr(err, entries)
+					lw.log.Printf("error flushing OCI logs: %s\n", err)
 				}
 				entries = nil
 			}
@@ -164,7 +171,7 @@ func (lw *LogWriter) worker(done, flushed chan bool) {
 			if len(entries) > 0 {
 				err = lw.flush(entries)
 				if err != nil {
-					handleWriteErr(err, entries)
+					lw.log.Printf("error flushing OCI logs: %s\n", err)
 				}
 			}
 			flushed <- true
@@ -206,9 +213,4 @@ func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 	}
 
 	return nil
-}
-
-func handleWriteErr(err error, entries []loggingingestion.LogEntry) {
-	log.Println("error flushing logs to OCI Logging", err)
-	log.Printf("entries: %v\n", entries)
 }

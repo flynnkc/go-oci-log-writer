@@ -85,7 +85,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		flushed: make(chan bool),
 	}
 
-	go lw.worker()
+	go lw.worker(lw.done, lw.flushed)
 
 	return &lw, nil
 }
@@ -138,7 +138,7 @@ func (lw *LogWriter) Close() error {
 // Worker runs as a goroutine and receives logs, flushing when buffer is reached.
 // Since sending logs to OCI is a slow network operation, this should happen
 // concurrently with other log processing to prevent blocking.
-func (lw *LogWriter) worker() {
+func (lw *LogWriter) worker(done, flushed chan bool) {
 	var entries []loggingingestion.LogEntry
 	var err error
 	bufferSize := cap(lw.buffer)
@@ -154,14 +154,20 @@ func (lw *LogWriter) worker() {
 				}
 				entries = nil
 			}
-		case <-lw.done:
+		case <-done:
+			// Check to make sure buffer is empty
+			for i := 0; i < len(lw.buffer); i++ {
+				entries = append(entries, <-lw.buffer)
+			}
+
+			// Check if there are any entries to flush
 			if len(entries) > 0 {
 				err = lw.flush(entries)
 				if err != nil {
 					handleWriteErr(err, entries)
 				}
 			}
-			lw.flushed <- true
+			flushed <- true
 			return
 		}
 	}

@@ -31,7 +31,23 @@ func TestNew(t *testing.T) {
 	logType := "ghi"
 	provider := common.DefaultConfigProvider()
 
-	t.Run("LogId=1", func(t *testing.T) {
+	// Standard use case
+	t.Run("NewLog=1", func(t *testing.T) {
+		d := lw.LogWriterDetails{
+			Provider: provider,
+			LogId:    &logId,
+			Source:   &source,
+			Type:     &logType,
+		}
+
+		_, err := lw.New(d)
+		if err != nil {
+			t.Errorf("error creating new log writer: %v", err)
+		}
+	})
+
+	// No Log ID
+	t.Run("NewLogId=1", func(t *testing.T) {
 		d := lw.LogWriterDetails{
 			Provider: provider,
 			Source:   &source,
@@ -44,7 +60,8 @@ func TestNew(t *testing.T) {
 		}
 	})
 
-	t.Run("LogId=2", func(t *testing.T) {
+	// Empty Log ID
+	t.Run("NewLogId=2", func(t *testing.T) {
 		d := lw.LogWriterDetails{
 			LogId:    common.String(""),
 			Provider: provider,
@@ -58,7 +75,8 @@ func TestNew(t *testing.T) {
 		}
 	})
 
-	t.Run("LogSource=1", func(t *testing.T) {
+	// No log source
+	t.Run("NewLogSource=1", func(t *testing.T) {
 		d := lw.LogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
@@ -71,7 +89,8 @@ func TestNew(t *testing.T) {
 		}
 	})
 
-	t.Run("LogType=1", func(t *testing.T) {
+	// No Log Type
+	t.Run("NewLogType=1", func(t *testing.T) {
 		d := lw.LogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
@@ -86,16 +105,21 @@ func TestNew(t *testing.T) {
 }
 
 func TestWrite(t *testing.T) {
-	details.LogId = common.String(os.Getenv("OCI_LOG_ID"))
-	writer, err := lw.New(details)
-	if err != nil {
-		t.Fatalf("error setting up write test: %v", err)
-	} else if writer.LogId == common.String("") {
-		t.Fatal("writer LogId empty")
-	}
+	d := details
+	d.LogId = common.String(os.Getenv("OCI_LOG_ID"))
 
+	// Normal writes
 	t.Run("Write=1", func(t *testing.T) {
-		s := []byte("Write Test 1")
+		t.Parallel()
+
+		writer, err := lw.New(d)
+		if err != nil {
+			t.Fatalf("error setting up write test: %v", err)
+		} else if writer.LogId == common.String("") {
+			t.Fatal("writer LogId empty")
+		}
+
+		s := []byte("Write Test 1: 1 of 2")
 		p, err := writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on first write: %v", err)
@@ -104,22 +128,31 @@ func TestWrite(t *testing.T) {
 			t.Fail()
 		}
 
+		s = []byte("Write Test 1: 2 of 2")
 		p, err = writer.Write(s)
 		if err != nil {
-			t.Fatalf("error on second write: %v", err)
+			t.Errorf("error on second write: %v", err)
 		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
+			t.Errorf("Incorrect number of bytes returned, got %v want %v", p, len(s))
 		}
 	})
 
 	// Remove mandatory fields and see what happens
 	t.Run("Write=2", func(t *testing.T) {
+		t.Parallel()
+
+		writer, err := lw.New(d)
+		if err != nil {
+			t.Fatalf("error setting up write test: %v", err)
+		} else if writer.LogId == common.String("") {
+			t.Fatal("writer LogId empty")
+		}
+
 		writer.Source = nil
 		writer.Subject = nil
 		writer.Type = nil
 
-		s := []byte("Write Test 2")
+		s := []byte("Write Test 2: 1 of 2")
 		p, err := writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on third write: %v", err)
@@ -128,6 +161,7 @@ func TestWrite(t *testing.T) {
 			t.Fail()
 		}
 
+		s = []byte("Write Test 2: 2 of 2")
 		p, err = writer.Write(s)
 		if err != nil {
 			t.Fatalf("error on third write: %v", err)
@@ -141,13 +175,16 @@ func TestWrite(t *testing.T) {
 func TestClose(t *testing.T) {
 	details.LogId = common.String(os.Getenv("OCI_LOG_ID"))
 
-	writer, err := lw.New(details)
-	if err != nil {
-		t.Fatalf("error setting up write test: %v", err)
-	}
-
+	// Normal Close
 	t.Run("Close=1", func(t *testing.T) {
-		err := writer.Close()
+		t.Parallel()
+
+		writer, err := lw.New(details)
+		if err != nil {
+			t.Errorf("error configuring writer for Close1: %v", err)
+		}
+
+		err = writer.Close()
 		if err != nil {
 			t.Errorf("Failed first close: %v", err)
 		}
@@ -155,7 +192,15 @@ func TestClose(t *testing.T) {
 
 	// No call to flush
 	t.Run("Close=2", func(t *testing.T) {
-		err := writer.Close()
+		t.Parallel()
+
+		writer, err := lw.New(details)
+		if err != nil {
+			t.Errorf("error configuring writer for Close1: %v", err)
+		}
+
+		writer.Close()
+		err = writer.Close()
 		if !errors.Is(err, lw.ErrClosed) {
 			t.Errorf("Failed second close: %v", err)
 		}
@@ -163,8 +208,10 @@ func TestClose(t *testing.T) {
 
 	// Should see all 3 messages after this test
 	t.Run("Close=3", func(t *testing.T) {
+		t.Parallel()
+
 		// New open writer
-		writer, err = lw.New(details)
+		writer, err := lw.New(details)
 		if err != nil {
 			t.Fatalf("error initializing writer: %v", err)
 		}
@@ -176,7 +223,7 @@ func TestClose(t *testing.T) {
 			}
 		}
 
-		err := writer.Close()
+		err = writer.Close()
 		if err != nil {
 			t.Errorf("Failed third close: %v", err)
 		}

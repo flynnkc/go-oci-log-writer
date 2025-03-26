@@ -17,6 +17,7 @@ var (
 	ErrNoLogType    = errors.New("error Log Type not specified")
 	ErrLogEntrySize = errors.New("error log entry greater than 1 megabyte")
 	ErrClosed       = errors.New("error log writer closed")
+	ErrNot2XX       = errors.New("error non-2XX status code in put log response")
 )
 
 // LogWriter implements the io.Writer interface for the purposes of sending data
@@ -196,7 +197,7 @@ func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 	if err != nil {
 		return err
 	} else if response.RawResponse.StatusCode != 200 {
-		return errors.New(response.RawResponse.Status)
+		return ErrNot2XX
 	}
 
 	return nil

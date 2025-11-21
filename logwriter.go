@@ -19,11 +19,17 @@ var (
 	ErrLogEntrySize = errors.New("error log entry greater than 1 megabyte")
 	ErrClosed       = errors.New("error log writer closed")
 	ErrNot2XX       = errors.New("error non-2XX status code in put log response")
+	logSpecVersion  = common.String("1.0") // Mandatory value per SDK docs
 )
 
-// LogWriter implements the io.Writer interface for the purposes of sending data
+const (
+	flushInterval   = time.Duration(1 * time.Minute)
+	responseTimeout = time.Duration(10 * time.Second)
+)
+
+// OCILogWriter implements the io.Writer interface for the purposes of sending data
 // to the OCI Logging service.
-type LogWriter struct {
+type OCILogWriter struct {
 	Client  loggingingestion.LoggingClient
 	LogId   *string
 	Source  *string
@@ -36,7 +42,9 @@ type LogWriter struct {
 	flushed chan bool
 }
 
-type LogWriterDetails struct {
+// OCILogWriterDetails stores details required for OCI Logging entries. Source,
+// Subject, and Type MUST NOT be nil.
+type OCILogWriterDetails struct {
 	// Log OCID
 	LogId    *string                      `mandatory:"true" json:"logId"`
 	Provider common.ConfigurationProvider `mandatory:"true" json:"provider"`
@@ -50,8 +58,8 @@ type LogWriterDetails struct {
 	ErrorLog   *log.Logger `mandatory:"false"`
 }
 
-// New returns a pointer to the LogWriter or an error
-func New(cfg LogWriterDetails) (*LogWriter, error) {
+// NewOCILogWriter returns a pointer to the LogWriter or an error
+func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 
 	// Validate LogWriterDetails
 	if cfg.LogId == nil {
@@ -80,7 +88,7 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 		return nil, err
 	}
 
-	lw := LogWriter{
+	lw := OCILogWriter{
 		buffer:  make(chan loggingingestion.LogEntry, *cfg.BufferSize),
 		Client:  client,
 		LogId:   cfg.LogId,
@@ -100,9 +108,9 @@ func New(cfg LogWriterDetails) (*LogWriter, error) {
 
 // Write implements the io.Writer interface. Writes a single log entry with slice
 // of byte p. Uses buffered output to reduce network traffic and API requests.
-// Returns the length of data written and an error for checking.
-func (lw *LogWriter) Write(p []byte) (int, error) {
-	// Max 1 MB per entry
+// Returns the length of data written and an error for checking. Max 1 MB per entry.
+func (lw *OCILogWriter) Write(p []byte) (int, error) {
+
 	if len(p) > 1048576 {
 		return 0, ErrLogEntrySize
 	}
@@ -130,7 +138,7 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 // Close flushes the buffer and closes the channel. Should be called in the
 // cleanup for an exiting program. Uses sync to prevent multiple closes on
 // the buffer channel. Implements io.Closer interface.
-func (lw *LogWriter) Close() error {
+func (lw *OCILogWriter) Close() error {
 	if lw.closed {
 		return ErrClosed
 	}
@@ -146,22 +154,31 @@ func (lw *LogWriter) Close() error {
 // Worker runs as a goroutine and receives logs, flushing when buffer is reached.
 // Since sending logs to OCI is a slow network operation, this should happen
 // concurrently with other log processing to prevent blocking.
-func (lw *LogWriter) worker(done, flushed chan bool) {
+func (lw *OCILogWriter) worker(done, flushed chan bool) {
 	var entries []loggingingestion.LogEntry
 	var err error
 	bufferSize := cap(lw.buffer)
+
+	ticker := time.NewTicker(flushInterval)
 
 	for {
 		select {
 		case entry := <-lw.buffer:
 			entries = append(entries, entry)
-			if len(entries) >= bufferSize {
+			if len(entries) >= bufferSize>>1 {
 				err = lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 				}
 				entries = nil
+				ticker.Reset(flushInterval)
 			}
+		case <-ticker.C:
+			err = lw.flush(entries)
+			if err != nil {
+				lw.log.Printf("error flushing OCI logs: %s\n", err)
+			}
+			entries = nil
 		case <-done:
 			// Check to make sure buffer is empty
 			for i := 0; i < len(lw.buffer); i++ {
@@ -176,6 +193,7 @@ func (lw *LogWriter) worker(done, flushed chan bool) {
 				}
 			}
 			flushed <- true
+			ticker.Stop()
 			return
 		}
 	}
@@ -184,7 +202,10 @@ func (lw *LogWriter) worker(done, flushed chan bool) {
 // Flush writes the logs to the OCI Logging service. Flush empties the buffer and
 // sends collected log entries to OCI as a single batch. Returns an error on bad
 // requests.
-func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
+func (lw *OCILogWriter) flush(entries []loggingingestion.LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
 
 	batch := loggingingestion.LogEntryBatch{
 		Entries: entries,
@@ -197,7 +218,7 @@ func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 	}
 
 	details := loggingingestion.PutLogsDetails{
-		Specversion:     common.String("1.0"), // Mandatory value per SKD docs
+		Specversion:     logSpecVersion,
 		LogEntryBatches: []loggingingestion.LogEntryBatch{batch},
 	}
 
@@ -206,10 +227,14 @@ func (lw *LogWriter) flush(entries []loggingingestion.LogEntry) error {
 		PutLogsDetails: details,
 	}
 
-	response, err := lw.Client.PutLogs(context.Background(), request)
+	ctx, cancel := context.WithTimeout(context.Background(), responseTimeout)
+	defer cancel()
+
+	response, err := lw.Client.PutLogs(ctx, request)
 	if err != nil {
 		return err
-	} else if response.RawResponse.StatusCode != 200 {
+	} else if response.RawResponse.StatusCode < 200 ||
+		response.RawResponse.StatusCode > 299 {
 		return ErrNot2XX
 	}
 

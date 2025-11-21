@@ -16,7 +16,7 @@ import (
 */
 
 var (
-	details lw.LogWriterDetails = lw.LogWriterDetails{
+	details lw.OCILogWriterDetails = lw.OCILogWriterDetails{
 		Provider:   common.DefaultConfigProvider(),
 		Source:     common.String("Source"),
 		Type:       common.String("Type"),
@@ -33,14 +33,14 @@ func TestNew(t *testing.T) {
 
 	// Standard use case
 	t.Run("NewLog=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := lw.OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
+		_, err := lw.NewOCILogWriter(d)
 		if err != nil {
 			t.Errorf("error creating new log writer: %v", err)
 		}
@@ -48,13 +48,13 @@ func TestNew(t *testing.T) {
 
 	// No Log ID
 	t.Run("NewLogId=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := lw.OCILogWriterDetails{
 			Provider: provider,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
+		_, err := lw.NewOCILogWriter(d)
 		if !errors.Is(err, lw.ErrNoLogId) {
 			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogId)
 		}
@@ -62,14 +62,14 @@ func TestNew(t *testing.T) {
 
 	// Empty Log ID
 	t.Run("NewLogId=2", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := lw.OCILogWriterDetails{
 			LogId:    common.String(""),
 			Provider: provider,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
+		_, err := lw.NewOCILogWriter(d)
 		if !errors.Is(err, lw.ErrNoLogId) {
 			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogId)
 		}
@@ -77,13 +77,13 @@ func TestNew(t *testing.T) {
 
 	// No log source
 	t.Run("NewLogSource=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := lw.OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
+		_, err := lw.NewOCILogWriter(d)
 		if !errors.Is(err, lw.ErrNoLogSource) {
 			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogSource)
 		}
@@ -91,13 +91,13 @@ func TestNew(t *testing.T) {
 
 	// No Log Type
 	t.Run("NewLogType=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := lw.OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Source:   &source,
 		}
 
-		_, err := lw.New(d)
+		_, err := lw.NewOCILogWriter(d)
 		if !errors.Is(err, lw.ErrNoLogType) {
 			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogType)
 		}
@@ -112,7 +112,7 @@ func TestWrite(t *testing.T) {
 	t.Run("Write=1", func(t *testing.T) {
 		t.Parallel()
 
-		writer, err := lw.New(d)
+		writer, err := lw.NewOCILogWriter(d)
 		if err != nil {
 			t.Fatalf("error setting up write test: %v", err)
 		} else if writer.LogId == common.String("") {
@@ -141,7 +141,7 @@ func TestWrite(t *testing.T) {
 	t.Run("Write=2", func(t *testing.T) {
 		t.Parallel()
 
-		writer, err := lw.New(d)
+		writer, err := lw.NewOCILogWriter(d)
 		if err != nil {
 			t.Fatalf("error setting up write test: %v", err)
 		} else if writer.LogId == common.String("") {
@@ -179,7 +179,7 @@ func TestClose(t *testing.T) {
 	t.Run("Close=1", func(t *testing.T) {
 		t.Parallel()
 
-		writer, err := lw.New(details)
+		writer, err := lw.NewOCILogWriter(details)
 		if err != nil {
 			t.Errorf("error configuring writer for Close1: %v", err)
 		}
@@ -194,7 +194,7 @@ func TestClose(t *testing.T) {
 	t.Run("Close=2", func(t *testing.T) {
 		t.Parallel()
 
-		writer, err := lw.New(details)
+		writer, err := lw.NewOCILogWriter(details)
 		if err != nil {
 			t.Errorf("error configuring writer for Close1: %v", err)
 		}
@@ -211,7 +211,7 @@ func TestClose(t *testing.T) {
 		t.Parallel()
 
 		// New open writer
-		writer, err := lw.New(details)
+		writer, err := lw.NewOCILogWriter(details)
 		if err != nil {
 			t.Fatalf("error initializing writer: %v", err)
 		}

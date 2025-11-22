@@ -1,231 +1,274 @@
-package goocilogwriter_test
+package goocilogwriter
 
 import (
+	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
-	lw "github.com/flynnkc/go-oci-log-writer"
 	"github.com/oracle/oci-go-sdk/v65/common"
+	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
-/*
-	NOTE: Environment variables OCI_LOG_ID must be set with valid Log OCID
-		  before testing.
-
-*/
-
-var (
-	details lw.LogWriterDetails = lw.LogWriterDetails{
-		Provider:   common.DefaultConfigProvider(),
-		Source:     common.String("Source"),
-		Type:       common.String("Type"),
-		Subject:    common.String("Subject"),
-		BufferSize: common.Int(2),
-	}
+const (
+	mockPEMKey string = `-----BEGIN PRIVATE KEY-----
+MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAJ+2/yQhkiw8mzIW
+7bQbrDB2QH4HsTEX9Uh4f0PDJ+2fonuwSmuTLjclXwKOd8lxgTH2nu5MFFA7siD/
+iik5XggD8RGfwqLfIJe62FhYG/c71Tfoocvmv/OOaYSapsXlWlE7fu5SDp2yAZFV
+Z1+TUP/3vEYVxpPjQAZb6qZ7j+tPAgMBAAECgYAIHYJFUbddrA6ust+NIULUi42n
+Wbi1J+R8tDKzPL1Qo6Xb5w9A/A+DGdEEDj0j7TKFWWSl8xOtJ/tbFeDtS07twMSj
+3shmgvrd/2J0LyDbX01N4w3T8eB0TQvJZuI70wodKV8ZrkeaKLI0ntcPJRFiy/Oq
+7L41Q7s6tnd9hQ/Y4QJBAMIeijjinSF9yV7PjqRcmMi/7IYy7+uMXr3xMXXty5P3
+NQ5htAn8lO0uK8fg0Pi/GTEBPVQcAU8sWlVSuI023CkCQQDSoNE/fkoOGNBWxaFz
+Zf/g9xE88GWdEtFuhaq7RofTxmtmIv1J+Ho3WCODGFEXr0dicox97XRyhUMJCbVO
+pXq3AkAC2vglhg/RokwH/P2YJVSJ/2i3QKCO0m3CVX3owiqwbn51S7KeQvzd0EQM
+mJ36SrVQJziDuDW8uGZLwv+79AahAkEAohyGkLDZvJnamD6J8fCajYJ7cQSxoMBg
+EwmsC3HQju2TscvSWQF2x2v+ASNRHsKYVaxGd5GwY4gvvSAMvNheZwJAO9QapTwP
+HZ7iMqihh32R+WsG7AemC/9uniupdiQor8zs1O9n1KGjDbqUEk0hXLS+D0i2FO/O
+mcS2wXH8qr8YvQ==
+-----END PRIVATE KEY-----`
 )
 
-func TestNew(t *testing.T) {
-	logId := "abc"
-	source := "def"
-	logType := "ghi"
-	provider := common.DefaultConfigProvider()
+type mockLoggingClient struct {
+	mock.Mock
+}
+
+func (m *mockLoggingClient) PutLogs(ctx context.Context,
+	request loggingingestion.PutLogsRequest) (loggingingestion.PutLogsResponse,
+	error) {
+	args := m.Called(ctx, request)
+	return args.Get(0).(loggingingestion.PutLogsResponse), args.Error(1)
+}
+
+type mockConfigurationProvider struct {
+	mock.Mock
+}
+
+func (m *mockConfigurationProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
+	args := m.Called()
+	return args.Get(0).(*rsa.PrivateKey), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) KeyID() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) TenancyOCID() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) UserOCID() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) KeyFingerprint() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) Region() (string, error) {
+	args := m.Called()
+	return args.String(0), args.Error(1)
+}
+
+func (m *mockConfigurationProvider) AuthType() (common.AuthConfig, error) {
+	args := m.Called()
+	return args.Get(0).(common.AuthConfig), args.Error(1)
+}
+
+func TestNewOCILogWriter(t *testing.T) {
+	logId := "log id"
+	source := "source"
+	logType := "log type"
+	provider := &mockConfigurationProvider{}
+
+	key, _ := loadRSAKeyFromPEM(mockPEMKey)
+
+	provider.Mock.On("AuthType").Return(
+		common.AuthConfig{
+			AuthType: common.UserPrincipal,
+		}, nil,
+	)
+	provider.Mock.On("TenancyOCID").Return("tenancy", nil)
+	provider.Mock.On("UserOCID").Return("user", nil)
+	provider.Mock.On("KeyFingerprint").Return("fingerprint", nil)
+	provider.Mock.On("Region").Return("region", nil)
+	provider.Mock.On("KeyID").Return("signing key", nil)
+	provider.Mock.On("PrivateRSAKey").Return(key, nil)
 
 	// Standard use case
 	t.Run("NewLog=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
-		if err != nil {
-			t.Errorf("error creating new log writer: %v", err)
-		}
+		_, err := NewOCILogWriter(d)
+		assert.NoError(t, err, "error on valid new log writer")
 	})
 
 	// No Log ID
 	t.Run("NewLogId=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := OCILogWriterDetails{
 			Provider: provider,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
-		if !errors.Is(err, lw.ErrNoLogId) {
-			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogId)
-		}
+		_, err := NewOCILogWriter(d)
+		assert.Error(t, err, "no error on missing log id")
 	})
 
 	// Empty Log ID
 	t.Run("NewLogId=2", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := OCILogWriterDetails{
 			LogId:    common.String(""),
 			Provider: provider,
 			Source:   &source,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
-		if !errors.Is(err, lw.ErrNoLogId) {
-			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogId)
-		}
+		_, err := NewOCILogWriter(d)
+		assert.Error(t, err, "no error on empty log id")
 	})
 
 	// No log source
 	t.Run("NewLogSource=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Type:     &logType,
 		}
 
-		_, err := lw.New(d)
-		if !errors.Is(err, lw.ErrNoLogSource) {
-			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogSource)
-		}
+		_, err := NewOCILogWriter(d)
+		assert.Error(t, err, "no error on missing log source")
 	})
 
 	// No Log Type
 	t.Run("NewLogType=1", func(t *testing.T) {
-		d := lw.LogWriterDetails{
+		d := OCILogWriterDetails{
 			Provider: provider,
 			LogId:    &logId,
 			Source:   &source,
 		}
 
-		_, err := lw.New(d)
-		if !errors.Is(err, lw.ErrNoLogType) {
-			t.Errorf("No log ID: got %v want %v", err, lw.ErrNoLogType)
-		}
+		_, err := NewOCILogWriter(d)
+		assert.Error(t, err, "no error on missing log type")
 	})
 }
 
 func TestWrite(t *testing.T) {
-	d := details
-	d.LogId = common.String(os.Getenv("OCI_LOG_ID"))
+	writer := OCILogWriter{
+		Client: &mockLoggingClient{},
+		buffer: make(chan loggingingestion.LogEntry, 8),
+		closed: false,
+	}
 
-	// Normal writes
-	t.Run("Write=1", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := lw.New(d)
-		if err != nil {
-			t.Fatalf("error setting up write test: %v", err)
-		} else if writer.LogId == common.String("") {
-			t.Fatal("writer LogId empty")
-		}
-
-		s := []byte("Write Test 1: 1 of 2")
+	// Normal write
+	t.Run("Write=Valid", func(t *testing.T) {
+		s := []byte("Write Test 1")
 		p, err := writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on first write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
-
-		s = []byte("Write Test 1: 2 of 2")
-		p, err = writer.Write(s)
-		if err != nil {
-			t.Errorf("error on second write: %v", err)
-		} else if p != len(s) {
-			t.Errorf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-		}
+		assert.Equal(t, len(s), p,
+			"write bytes written does not match data length")
+		assert.NoError(t, err, "error on write")
 	})
 
-	// Remove mandatory fields and see what happens
-	t.Run("Write=2", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := lw.New(d)
-		if err != nil {
-			t.Fatalf("error setting up write test: %v", err)
-		} else if writer.LogId == common.String("") {
-			t.Fatal("writer LogId empty")
-		}
-
-		writer.Source = nil
-		writer.Subject = nil
-		writer.Type = nil
-
-		s := []byte("Write Test 2: 1 of 2")
+	t.Run("Write=TooLarge", func(t *testing.T) {
+		s := make([]byte, 1048577)
 		p, err := writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on third write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
+		assert.Equal(t, 0, p, "incorrect bytes written")
+		assert.EqualError(t, err, ErrLogEntrySize.Error())
+	})
 
-		s = []byte("Write Test 2: 2 of 2")
+	t.Run("Write=File", func(t *testing.T) {
+		queueFile, _ := os.CreateTemp("", "logTest")
+		writer.queueFile = queueFile
+		writer.buffer = make(chan loggingingestion.LogEntry, 1)
+
+		t.Logf("Temporary test file: %s", writer.queueFile.Name())
+
+		s := []byte("Write Test 3 - 1")
+		p, err := writer.Write(s)
+		assert.Equal(t, len(s), p)
+		assert.NoError(t, err)
+
+		s = []byte("Write Test 3 - 2")
 		p, err = writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on third write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
+		assert.Equal(t, len(s), p)
+		assert.NoError(t, err)
+
+		info, _ := writer.queueFile.Stat()
+		assert.Greater(t, info.Size(), int64(0))
+
+		writer.queueFile.Close()
+		os.Remove(writer.queueFile.Name())
+	})
+
+	t.Run("Write=Closed", func(t *testing.T) {
+		writer.closed = true
+		s := []byte("Write test 4")
+		p, err := writer.Write(s)
+		assert.Equal(t, 0, p)
+		assert.EqualError(t, err, ErrClosed.Error())
 	})
 }
 
 func TestClose(t *testing.T) {
-	details.LogId = common.String(os.Getenv("OCI_LOG_ID"))
 
 	// Normal Close
-	t.Run("Close=1", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := lw.New(details)
-		if err != nil {
-			t.Errorf("error configuring writer for Close1: %v", err)
+	t.Run("Close=Valid", func(t *testing.T) {
+		writer := OCILogWriter{
+			closed:  false,
+			done:    make(chan bool),
+			flushed: make(chan bool),
 		}
 
-		err = writer.Close()
-		if err != nil {
-			t.Errorf("Failed first close: %v", err)
-		}
+		go func() {
+			time.Sleep(3 * time.Second)
+			<-writer.done
+			writer.flushed <- true
+		}()
+
+		err := writer.Close()
+		assert.NoError(t, err)
+		assert.Equal(t, true, writer.closed)
 	})
 
-	// No call to flush
-	t.Run("Close=2", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := lw.New(details)
-		if err != nil {
-			t.Errorf("error configuring writer for Close1: %v", err)
+	t.Run("Close=Closed", func(t *testing.T) {
+		writer := OCILogWriter{
+			closed:  true,
+			done:    make(chan bool),
+			flushed: make(chan bool),
 		}
 
-		writer.Close()
-		err = writer.Close()
-		if !errors.Is(err, lw.ErrClosed) {
-			t.Errorf("Failed second close: %v", err)
-		}
+		err := writer.Close()
+		assert.EqualError(t, ErrClosed, err.Error())
 	})
 
-	// Should see all 3 messages after this test
-	t.Run("Close=3", func(t *testing.T) {
-		t.Parallel()
+}
 
-		// New open writer
-		writer, err := lw.New(details)
-		if err != nil {
-			t.Fatalf("error initializing writer: %v", err)
-		}
+func loadRSAKeyFromPEM(pemData string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block")
+	}
 
-		for _, s := range []string{"1 of 3", "2 of 3", "3 of 3"} {
-			p, err := writer.Write([]byte("Close Test 3: Message " + s))
-			if p == 0 || err != nil {
-				t.Fail()
-			}
-		}
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse RSA private key: %w", err)
+	}
 
-		err = writer.Close()
-		if err != nil {
-			t.Errorf("Failed third close: %v", err)
-		}
-	})
+	return privateKey, nil
 }

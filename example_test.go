@@ -37,7 +37,8 @@ func ExampleOCILogWriter() {
 	message := []byte("Access Granted")
 	b, err := writer.Write(message)
 	if err != nil {
-		// do something
+		fmt.Println(err)
+		return
 	}
 
 	fmt.Println("Bytes written:", b)

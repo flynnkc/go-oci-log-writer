@@ -18,24 +18,28 @@ import (
 )
 
 func main() {
-    provider, _ := identity.NewIdentityClientWithConfigurationProvider(
-        common.DefaultConfigProvider())
+    provider := common.DefaultConfigProvider()
+    logId := "ocid.abcd.1234"
 
-    details := olog.LogWriterDetails {
-        LogId: common.String("abc...xyz"),
+    details := ocilog.OCILogWriterDetails{
+        LogId:    &logId,
         Provider: provider,
-        Source: common.String("ServerA"),
-        Type: common.String("ServerA.AccessLog"),
+        Source:   common.String("ServerA"),
+        Type:     common.String("Access_Log"),
     }
 
-    writer, err := olog.New(details)
+    writer, err := ocilog.NewOCILogWriter(details)
     if err != nil {
         // do something
     }
-    // Defer close to flush buffer & prevent additional entries
     defer writer.Close()
 
-    logger := log.New(writer, "", log.Lshortfile)
-    logger.Println("this is a useful log entry")
+    message := []byte("Access Granted")
+    b, err := writer.Write(message)
+    if err != nil {
+        // do something
+    }
+
+    fmt.Println("Bytes written:", b)
 }
 ```

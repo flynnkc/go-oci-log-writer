@@ -3,6 +3,10 @@ package goocilogwriter
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +15,25 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+)
+
+const (
+	mockPEMKey string = `-----BEGIN PRIVATE KEY-----
+MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAJ+2/yQhkiw8mzIW
+7bQbrDB2QH4HsTEX9Uh4f0PDJ+2fonuwSmuTLjclXwKOd8lxgTH2nu5MFFA7siD/
+iik5XggD8RGfwqLfIJe62FhYG/c71Tfoocvmv/OOaYSapsXlWlE7fu5SDp2yAZFV
+Z1+TUP/3vEYVxpPjQAZb6qZ7j+tPAgMBAAECgYAIHYJFUbddrA6ust+NIULUi42n
+Wbi1J+R8tDKzPL1Qo6Xb5w9A/A+DGdEEDj0j7TKFWWSl8xOtJ/tbFeDtS07twMSj
+3shmgvrd/2J0LyDbX01N4w3T8eB0TQvJZuI70wodKV8ZrkeaKLI0ntcPJRFiy/Oq
+7L41Q7s6tnd9hQ/Y4QJBAMIeijjinSF9yV7PjqRcmMi/7IYy7+uMXr3xMXXty5P3
+NQ5htAn8lO0uK8fg0Pi/GTEBPVQcAU8sWlVSuI023CkCQQDSoNE/fkoOGNBWxaFz
+Zf/g9xE88GWdEtFuhaq7RofTxmtmIv1J+Ho3WCODGFEXr0dicox97XRyhUMJCbVO
+pXq3AkAC2vglhg/RokwH/P2YJVSJ/2i3QKCO0m3CVX3owiqwbn51S7KeQvzd0EQM
+mJ36SrVQJziDuDW8uGZLwv+79AahAkEAohyGkLDZvJnamD6J8fCajYJ7cQSxoMBg
+EwmsC3HQju2TscvSWQF2x2v+ASNRHsKYVaxGd5GwY4gvvSAMvNheZwJAO9QapTwP
+HZ7iMqihh32R+WsG7AemC/9uniupdiQor8zs1O9n1KGjDbqUEk0hXLS+D0i2FO/O
+mcS2wXH8qr8YvQ==
+-----END PRIVATE KEY-----`
 )
 
 type mockLoggingClient struct {
@@ -68,6 +91,20 @@ func TestNewOCILogWriter(t *testing.T) {
 	source := "source"
 	logType := "log type"
 	provider := &mockConfigurationProvider{}
+
+	key, _ := loadRSAKeyFromPEM(mockPEMKey)
+
+	provider.Mock.On("AuthType").Return(
+		common.AuthConfig{
+			AuthType: common.UserPrincipal,
+		}, nil,
+	)
+	provider.Mock.On("TenancyOCID").Return("tenancy", nil)
+	provider.Mock.On("UserOCID").Return("user", nil)
+	provider.Mock.On("KeyFingerprint").Return("fingerprint", nil)
+	provider.Mock.On("Region").Return("region", nil)
+	provider.Mock.On("KeyID").Return("signing key", nil)
+	provider.Mock.On("PrivateRSAKey").Return(key, nil)
 
 	// Standard use case
 	t.Run("NewLog=1", func(t *testing.T) {
@@ -220,4 +257,18 @@ func TestClose(t *testing.T) {
 		assert.EqualError(t, ErrClosed, err.Error())
 	})
 
+}
+
+func loadRSAKeyFromPEM(pemData string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block")
+	}
+
+	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse RSA private key: %w", err)
+	}
+
+	return privateKey, nil
 }

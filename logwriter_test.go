@@ -3,9 +3,9 @@ package goocilogwriter
 import (
 	"context"
 	"crypto/rsa"
-	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
@@ -63,20 +63,10 @@ func (m *mockConfigurationProvider) AuthType() (common.AuthConfig, error) {
 	return args.Get(0).(common.AuthConfig), args.Error(1)
 }
 
-var (
-	details OCILogWriterDetails = OCILogWriterDetails{
-		Provider:   &mockConfigurationProvider{},
-		Source:     common.String("Source"),
-		Type:       common.String("Type"),
-		Subject:    common.String("Subject"),
-		BufferSize: common.Int(2),
-	}
-)
-
 func TestNewOCILogWriter(t *testing.T) {
-	logId := "abc"
-	source := "def"
-	logType := "ghi"
+	logId := "log id"
+	source := "source"
+	logType := "log type"
 	provider := &mockConfigurationProvider{}
 
 	// Standard use case
@@ -145,112 +135,89 @@ func TestNewOCILogWriter(t *testing.T) {
 func TestWrite(t *testing.T) {
 	writer := OCILogWriter{
 		Client: &mockLoggingClient{},
+		buffer: make(chan loggingingestion.LogEntry, 8),
+		closed: false,
 	}
 
-	// Normal writes
-	t.Run("Write=1", func(t *testing.T) {
-		t.Parallel()
-
-		s := []byte("Write Test 1: 1 of 2")
+	// Normal write
+	t.Run("Write=Valid", func(t *testing.T) {
+		s := []byte("Write Test 1")
 		p, err := writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on first write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
-
-		s = []byte("Write Test 1: 2 of 2")
-		p, err = writer.Write(s)
-		if err != nil {
-			t.Errorf("error on second write: %v", err)
-		} else if p != len(s) {
-			t.Errorf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-		}
+		assert.Equal(t, len(s), p,
+			"write bytes written does not match data length")
+		assert.NoError(t, err, "error on write")
 	})
 
-	// Remove mandatory fields and see what happens
-	t.Run("Write=2", func(t *testing.T) {
-		t.Parallel()
-
-		writer.Source = nil
-		writer.Subject = nil
-		writer.Type = nil
-
-		s := []byte("Write Test 2: 1 of 2")
+	t.Run("Write=TooLarge", func(t *testing.T) {
+		s := make([]byte, 1048577)
 		p, err := writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on third write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
+		assert.Equal(t, 0, p, "incorrect bytes written")
+		assert.EqualError(t, err, ErrLogEntrySize.Error())
+	})
 
-		s = []byte("Write Test 2: 2 of 2")
+	t.Run("Write=File", func(t *testing.T) {
+		queueFile, _ := os.CreateTemp("", "logTest")
+		writer.queueFile = queueFile
+		writer.buffer = make(chan loggingingestion.LogEntry, 1)
+
+		t.Logf("Temporary test file: %s", writer.queueFile.Name())
+
+		s := []byte("Write Test 3 - 1")
+		p, err := writer.Write(s)
+		assert.Equal(t, len(s), p)
+		assert.NoError(t, err)
+
+		s = []byte("Write Test 3 - 2")
 		p, err = writer.Write(s)
-		if err != nil {
-			t.Fatalf("error on third write: %v", err)
-		} else if p != len(s) {
-			t.Logf("Incorrect number of bytes returned, got %v want %v", p, len(s))
-			t.Fail()
-		}
+		assert.Equal(t, len(s), p)
+		assert.NoError(t, err)
+
+		info, _ := writer.queueFile.Stat()
+		assert.Greater(t, info.Size(), int64(0))
+
+		writer.queueFile.Close()
+		os.Remove(writer.queueFile.Name())
+	})
+
+	t.Run("Write=Closed", func(t *testing.T) {
+		writer.closed = true
+		s := []byte("Write test 4")
+		p, err := writer.Write(s)
+		assert.Equal(t, 0, p)
+		assert.EqualError(t, err, ErrClosed.Error())
 	})
 }
 
 func TestClose(t *testing.T) {
-	details.LogId = common.String(os.Getenv("OCI_LOG_ID"))
 
 	// Normal Close
-	t.Run("Close=1", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := NewOCILogWriter(details)
-		if err != nil {
-			t.Errorf("error configuring writer for Close1: %v", err)
+	t.Run("Close=Valid", func(t *testing.T) {
+		writer := OCILogWriter{
+			closed:  false,
+			done:    make(chan bool),
+			flushed: make(chan bool),
 		}
 
-		err = writer.Close()
-		if err != nil {
-			t.Errorf("Failed first close: %v", err)
-		}
+		go func() {
+			time.Sleep(3 * time.Second)
+			<-writer.done
+			writer.flushed <- true
+		}()
+
+		err := writer.Close()
+		assert.NoError(t, err)
+		assert.Equal(t, true, writer.closed)
 	})
 
-	// No call to flush
-	t.Run("Close=2", func(t *testing.T) {
-		t.Parallel()
-
-		writer, err := NewOCILogWriter(details)
-		if err != nil {
-			t.Errorf("error configuring writer for Close1: %v", err)
+	t.Run("Close=Closed", func(t *testing.T) {
+		writer := OCILogWriter{
+			closed:  true,
+			done:    make(chan bool),
+			flushed: make(chan bool),
 		}
 
-		writer.Close()
-		err = writer.Close()
-		if !errors.Is(err, ErrClosed) {
-			t.Errorf("Failed second close: %v", err)
-		}
+		err := writer.Close()
+		assert.EqualError(t, ErrClosed, err.Error())
 	})
 
-	// Should see all 3 messages after this test
-	t.Run("Close=3", func(t *testing.T) {
-		t.Parallel()
-
-		// New open writer
-		writer, err := NewOCILogWriter(details)
-		if err != nil {
-			t.Fatalf("error initializing writer: %v", err)
-		}
-
-		for _, s := range []string{"1 of 3", "2 of 3", "3 of 3"} {
-			p, err := writer.Write([]byte("Close Test 3: Message " + s))
-			if p == 0 || err != nil {
-				t.Fail()
-			}
-		}
-
-		err = writer.Close()
-		if err != nil {
-			t.Errorf("Failed third close: %v", err)
-		}
-	})
 }

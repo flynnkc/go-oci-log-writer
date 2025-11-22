@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,7 @@ const (
 	responseTimeout = time.Duration(10 * time.Second)
 )
 
+// LoggingClient is intended to accept a loggingingestion.LoggingClient
 type LoggingClient interface {
 	PutLogs(context.Context, loggingingestion.PutLogsRequest) (loggingingestion.PutLogsResponse, error)
 }
@@ -44,27 +46,26 @@ type OCILogWriter struct {
 	Subject   *string
 	Type      *string
 	log       *log.Logger
-	closed    bool // Prevent further writes after Close called
 	buffer    chan loggingingestion.LogEntry
 	queueFile *os.File
-	done      chan bool
-	flushed   chan bool
+	closed    bool      // Prevent further writes after Close called
+	done      chan bool // Signal closure to worker
+	flushed   chan bool // Signal worker is finished to parent
+	rwmux     sync.RWMutex
 }
 
 // OCILogWriterDetails stores details required for OCI Logging entries. Source,
-// Subject, and Type MUST NOT be nil.
+// Subject, and Type MUST NOT be nil. More information can be found at
+// https://pkg.go.dev/github.com/oracle/oci-go-sdk/v65@v65.105.0/loggingingestion
 type OCILogWriterDetails struct {
 	// Log OCID
-	LogId    *string                      `mandatory:"true" json:"logId"`
-	Provider common.ConfigurationProvider `mandatory:"true" json:"provider"`
-	// Source of log. Needs to be a string. (ex. ServerA)
-	Source *string `mandatory:"true" json:"source"`
-	// Type of log. (ex. ServerA.AccessLog)
-	Type *string `mandatory:"true" json:"type"`
-	// Subject for further specification if desired
-	Subject    *string     `mandatory:"false" json:"subject"`
-	BufferSize *int        `mandatory:"false" json:"buffersize"`
-	ErrorLog   *log.Logger `mandatory:"false"`
+	LogId      *string                      `mandatory:"true" json:"logId"`
+	Provider   common.ConfigurationProvider `mandatory:"true" json:"provider"`
+	Source     *string                      `mandatory:"true" json:"source"`
+	Type       *string                      `mandatory:"true" json:"type"`
+	Subject    *string                      `mandatory:"false" json:"subject"`
+	BufferSize *int                         `mandatory:"false" json:"buffersize"`
+	ErrorLog   *log.Logger                  `mandatory:"false"`
 }
 
 // NewOCILogWriter returns a pointer to the LogWriter or an error
@@ -123,11 +124,15 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 
 // Write implements the io.Writer interface. Writes a single log entry with slice
 // of byte p. Uses buffered output to reduce network traffic and API requests.
-// Returns the length of data written and an error for checking. Max 1 MB per entry.
+// Returns the length of data written and an error for checking. Entries must be
+// less than 1MB.
 func (lw *OCILogWriter) Write(p []byte) (int, error) {
+	lw.rwmux.RLock()
+	defer lw.rwmux.RUnlock()
 
-	if len(p) > 1048576 {
-		return 0, ErrLogEntrySize
+	// Don't write to closed logger
+	if lw.closed {
+		return 0, ErrClosed
 	}
 
 	// Random UUID allocation for each log entry
@@ -144,10 +149,8 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 		},
 	}
 
-	// Don't write to closed logger
-	if lw.closed {
-
-		return 0, ErrClosed
+	if len(le.String()) > 1048576 {
+		return 0, ErrLogEntrySize
 	}
 
 	// Write to in-memory buffer
@@ -166,15 +169,19 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 }
 
 // Close flushes the buffer and closes the channel. Should be called in the
-// cleanup for an exiting program. Uses sync to prevent multiple closes on
-// the buffer channel. Implements io.Closer interface.
+// cleanup for an exiting program. Implements io.Closer interface. Close MUST be
+// called from here and from no other function.
 func (lw *OCILogWriter) Close() error {
+	lw.rwmux.Lock()
+
 	if lw.closed {
+		lw.rwmux.Unlock()
 		return ErrClosed
 	}
-
-	// Close up shop
 	lw.closed = true
+
+	lw.rwmux.Unlock()
+
 	lw.done <- true
 	<-lw.flushed // Wait for logs to finish flushing
 

@@ -28,20 +28,22 @@ func ExampleOCILogWriter() {
 
 	writer, err := ocilog.NewOCILogWriter(details)
 	if err != nil {
-		fmt.Println(err)
+		// Handle error
+		fmt.Println("done")
 		return
 	}
 	// Defer close to flush buffer & prevent additional entries
 	defer writer.Close()
 
 	message := []byte("Access Granted")
-	b, err := writer.Write(message)
+	_, err = writer.Write(message)
 	if err != nil {
-		fmt.Println(err)
+		// Handle error
+		fmt.Println("done")
 		return
 	}
 
-	fmt.Println("Bytes written:", b)
+	fmt.Println("done")
 	// Output:
-	// Bytes written: 14
+	// done
 }

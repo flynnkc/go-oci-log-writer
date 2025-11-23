@@ -27,9 +27,10 @@ var (
 )
 
 const (
-	flushInterval   = time.Duration(1 * time.Minute)
-	fileInterval    = time.Duration(1 * time.Hour)
-	responseTimeout = time.Duration(10 * time.Second)
+	flushInterval       = time.Duration(1 * time.Minute)
+	fileInterval        = time.Duration(1 * time.Hour)
+	responseTimeout     = time.Duration(10 * time.Second)
+	megaByte        int = 1024 * 1024
 )
 
 // LoggingClient is intended to accept a loggingingestion.LoggingClient
@@ -51,7 +52,8 @@ type OCILogWriter struct {
 	closed    bool      // Prevent further writes after Close called
 	done      chan bool // Signal closure to worker
 	flushed   chan bool // Signal worker is finished to parent
-	rwmux     sync.RWMutex
+	rwMux     sync.RWMutex
+	fileMux   sync.Mutex
 }
 
 // OCILogWriterDetails stores details required for OCI Logging entries. Source,
@@ -94,7 +96,7 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 		cfg.BufferSize = common.Int(2)
 	}
 	if cfg.ErrorLog == nil {
-		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error", log.LstdFlags|log.LUTC)
+		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error: ", log.LstdFlags|log.LUTC)
 	}
 
 	// provider can be user, instance, workload, or resource principal for flexibility
@@ -117,6 +119,8 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 		flushed:   make(chan bool),
 	}
 
+	lw.log.Printf("temporary log local failover location at %s\n", lw.queueFile.Name())
+
 	go lw.worker(lw.done, lw.flushed)
 
 	return &lw, nil
@@ -127,8 +131,8 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 // Returns the length of data written and an error for checking. Entries must be
 // less than 1MB.
 func (lw *OCILogWriter) Write(p []byte) (int, error) {
-	lw.rwmux.RLock()
-	defer lw.rwmux.RUnlock()
+	lw.rwMux.RLock()
+	defer lw.rwMux.RUnlock()
 
 	// Don't write to closed logger
 	if lw.closed {
@@ -149,7 +153,7 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 		},
 	}
 
-	if len(le.String()) > 1048576 {
+	if len(le.String()) > megaByte {
 		return 0, ErrLogEntrySize
 	}
 
@@ -157,6 +161,8 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	select {
 	case lw.buffer <- le:
 	default:
+		lw.fileMux.Lock()
+		defer lw.fileMux.Unlock()
 		// If buffer is full, write directly to queue file
 		err = writeLogEntryToFile(lw.queueFile, le)
 		if err != nil {
@@ -172,15 +178,15 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 // cleanup for an exiting program. Implements io.Closer interface. Close MUST be
 // called from here and from no other function.
 func (lw *OCILogWriter) Close() error {
-	lw.rwmux.Lock()
+	lw.rwMux.Lock()
 
 	if lw.closed {
-		lw.rwmux.Unlock()
+		lw.rwMux.Unlock()
 		return ErrClosed
 	}
 	lw.closed = true
 
-	lw.rwmux.Unlock()
+	lw.rwMux.Unlock()
 
 	lw.done <- true
 	<-lw.flushed // Wait for logs to finish flushing
@@ -189,13 +195,17 @@ func (lw *OCILogWriter) Close() error {
 
 }
 
-func writeLogEntryToFile(file *os.File, entry loggingingestion.LogEntry) error {
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return err
+// writeLogsToFile writes failed log entries to the queue file
+func (lw *OCILogWriter) writeLogsToFile(entries []loggingingestion.LogEntry) {
+	lw.fileMux.Lock()
+	defer lw.fileMux.Unlock()
+
+	for _, entry := range entries {
+		err := writeLogEntryToFile(lw.queueFile, entry)
+		if err != nil {
+			lw.log.Printf("error writing to queue file: %s\n", err)
+		}
 	}
-	_, err = file.Write(append(data, '\n'))
-	return err
 }
 
 // Worker runs as a goroutine and receives logs, flushing when buffer is reached.
@@ -217,13 +227,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 				err = lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
-					// Write failed entries back to queue file
-					for _, entry := range entries {
-						err = writeLogEntryToFile(lw.queueFile, entry)
-						if err != nil {
-							lw.log.Printf("error writing to queue file: %s\n", err)
-						}
-					}
+					lw.writeLogsToFile(entries)
 				}
 				entries = nil
 				flushTicker.Reset(flushInterval)
@@ -234,13 +238,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 				err = lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
-					// Write failed entries back to queue file
-					for _, entry := range entries {
-						err = writeLogEntryToFile(lw.queueFile, entry)
-						if err != nil {
-							lw.log.Printf("error writing to queue file: %s\n", err)
-						}
-					}
+					lw.writeLogsToFile(entries)
 				}
 				entries = nil
 			}
@@ -262,13 +260,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 				err = lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
-					// Write failed entries back to queue file
-					for _, entry := range entries {
-						err = writeLogEntryToFile(lw.queueFile, entry)
-						if err != nil {
-							lw.log.Printf("error writing to queue file: %s\n", err)
-						}
-					}
+					lw.writeLogsToFile(entries)
 				}
 			}
 
@@ -288,6 +280,9 @@ func (lw *OCILogWriter) processQueueFile() error {
 	// Read from queue file and send to OCI
 	lw.queueFile.Seek(0, io.SeekStart)
 	scanner := bufio.NewScanner(lw.queueFile)
+	scanner.Buffer(make([]byte, megaByte+1), megaByte+1)
+
+	entries := []loggingingestion.LogEntry{}
 	for scanner.Scan() {
 		var entry loggingingestion.LogEntry
 		err := json.Unmarshal(scanner.Bytes(), &entry)
@@ -295,18 +290,21 @@ func (lw *OCILogWriter) processQueueFile() error {
 			lw.log.Printf("error unmarshaling log entry: %s\n", err)
 			continue
 		}
-		err = lw.flush([]loggingingestion.LogEntry{entry})
-		if err != nil {
-			lw.log.Printf("error flushing log entry: %s\n", err)
-			// Write failed entry back to queue file
-			err = writeLogEntryToFile(lw.queueFile, entry)
-			if err != nil {
-				lw.log.Printf("error writing to queue file: %s\n", err)
-			}
-		}
+		entries = append(entries, entry)
 	}
+
+	// Reset file
+	lw.fileMux.Lock()
 	lw.queueFile.Truncate(0)
 	lw.queueFile.Seek(0, io.SeekStart)
+	lw.fileMux.Unlock()
+
+	// Flush and rewrite if failed
+	err := lw.flush(entries)
+	if err != nil {
+		lw.log.Printf("error flushing log entry: %s\n", err)
+		lw.writeLogsToFile(entries)
+	}
 	return scanner.Err()
 }
 
@@ -350,4 +348,15 @@ func (lw *OCILogWriter) flush(entries []loggingingestion.LogEntry) error {
 	}
 
 	return nil
+}
+
+// writeLogEntryToFile writes individual log entries to the queue file. MUST be
+// protected by fileMux lock.
+func writeLogEntryToFile(file *os.File, entry loggingingestion.LogEntry) error {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(append(data, '\n'))
+	return err
 }

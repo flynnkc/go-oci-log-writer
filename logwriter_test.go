@@ -186,7 +186,7 @@ func TestWrite(t *testing.T) {
 	})
 
 	t.Run("Write=TooLarge", func(t *testing.T) {
-		s := make([]byte, 1048577)
+		s := make([]byte, megaByte)
 		p, err := writer.Write(s)
 		assert.Equal(t, 0, p, "incorrect bytes written")
 		assert.EqualError(t, err, ErrLogEntrySize.Error())
@@ -195,25 +195,34 @@ func TestWrite(t *testing.T) {
 	t.Run("Write=File", func(t *testing.T) {
 		queueFile, _ := os.CreateTemp("", "logTest")
 		writer.queueFile = queueFile
-		writer.buffer = make(chan loggingingestion.LogEntry, 1)
+		writer.buffer = make(chan loggingingestion.LogEntry)
 
-		t.Logf("Temporary test file: %s", writer.queueFile.Name())
+		// Block buffer to force file writes
+		go func() {
+			writer.buffer <- loggingingestion.LogEntry{}
+		}()
 
-		s := []byte("Write Test 3 - 1")
-		p, err := writer.Write(s)
-		assert.Equal(t, len(s), p)
-		assert.NoError(t, err)
+		totalBytes := 0
 
-		s = []byte("Write Test 3 - 2")
-		p, err = writer.Write(s)
-		assert.Equal(t, len(s), p)
-		assert.NoError(t, err)
+		for i := 1; i < 6; i++ {
+			s := fmt.Appendf(nil, "Write Test 3 - %d", i)
+			p, err := writer.Write(s)
+			totalBytes += p
 
-		info, _ := writer.queueFile.Stat()
-		assert.Greater(t, info.Size(), int64(0))
+			assert.Equal(t, len(s), p)
+			assert.NoError(t, err)
+		}
+
+		info, err := writer.queueFile.Stat()
+		if err != nil {
+			t.Logf("Write=File: error getting queue file info %s", err)
+		}
+		t.Logf("%d bytes written to file", totalBytes)
+		assert.Greater(t, info.Size(), int64(totalBytes))
 
 		writer.queueFile.Close()
 		os.Remove(writer.queueFile.Name())
+		t.Logf("Cleaned up queue file at %s", writer.queueFile.Name())
 	})
 
 	t.Run("Write=Closed", func(t *testing.T) {
@@ -236,7 +245,7 @@ func TestClose(t *testing.T) {
 		}
 
 		go func() {
-			time.Sleep(3 * time.Second)
+			time.Sleep(2 * time.Second)
 			<-writer.done
 			writer.flushed <- true
 		}()

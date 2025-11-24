@@ -76,6 +76,10 @@ type OCILogWriterDetails struct {
 	// Default set to 200.
 	BufferSize *int `mandatory:"false" json:"buffersize"`
 
+	// Number of worker goroutines to process log entries concurrently.
+	// Default is 1.
+	WorkerCount *int `mandatory:"false" json:"workercount"`
+
 	// Queue file location for storing failed log entries. A temp queue file is
 	// created in the system temp location if left empty. LogWriter will
 	// periodically attempt to write logs to OCI Logging Log.
@@ -99,9 +103,9 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 	if cfg.Type == nil {
 		return nil, ErrNoLogType
 	}
-	// Default buffer size of 200
+	// Default buffer size of 50
 	if cfg.BufferSize == nil {
-		cfg.BufferSize = common.Int(200)
+		cfg.BufferSize = common.Int(50)
 	} else if *cfg.BufferSize < 2 {
 		// Minimum buffer size
 		cfg.BufferSize = common.Int(2)
@@ -250,9 +254,7 @@ func (lw *OCILogWriter) writeLogsToFile(entries []loggingingestion.LogEntry) {
 // Since sending logs to OCI is a slow network operation, this should happen
 // concurrently with other log processing to prevent blocking.
 func (lw *OCILogWriter) worker(done, flushed chan bool) {
-	var entries []loggingingestion.LogEntry
-	var err error
-	bufferSize := cap(lw.buffer)
+	entries := make([]loggingingestion.LogEntry, cap(lw.buffer))
 
 	flushTicker := time.NewTicker(flushInterval)
 	fileTicker := time.NewTicker(fileInterval)
@@ -261,28 +263,28 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 		select {
 		case entry := <-lw.buffer:
 			entries = append(entries, entry)
-			if len(entries) >= bufferSize>>1 {
-				err = lw.flush(entries)
+			if len(entries) >= cap(lw.buffer)>>1 {
+				err := lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 					lw.writeLogsToFile(entries)
 				}
-				entries = nil
+				entries = make([]loggingingestion.LogEntry, cap(lw.buffer))
 				flushTicker.Reset(flushInterval)
 			}
 
 		case <-flushTicker.C:
 			if len(entries) > 0 {
-				err = lw.flush(entries)
+				err := lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 					lw.writeLogsToFile(entries)
 				}
-				entries = nil
+				entries = make([]loggingingestion.LogEntry, cap(lw.buffer))
 			}
 
 		case <-fileTicker.C:
-			err = lw.processQueueFile()
+			err := lw.processQueueFile()
 			if err != nil {
 				lw.log.Printf("error processing queue file: %s\n", err)
 			}
@@ -295,7 +297,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 
 			// Process remaining entries
 			if len(entries) > 0 {
-				err = lw.flush(entries)
+				err := lw.flush(entries)
 				if err != nil {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 					lw.writeLogsToFile(entries)
@@ -303,7 +305,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 			}
 
 			// Process queue file
-			err = lw.processQueueFile()
+			err := lw.processQueueFile()
 			if err != nil {
 				lw.log.Printf("error processing queue file: %s\n", err)
 			}

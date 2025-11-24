@@ -60,23 +60,34 @@ type OCILogWriter struct {
 // Subject, and Type MUST NOT be nil. More information can be found at
 // https://pkg.go.dev/github.com/oracle/oci-go-sdk/v65@v65.105.0/loggingingestion
 type OCILogWriterDetails struct {
-	// Log OCID
-	LogId      *string                      `mandatory:"true" json:"logId"`
-	Provider   common.ConfigurationProvider `mandatory:"true" json:"provider"`
-	Source     *string                      `mandatory:"true" json:"source"`
-	Type       *string                      `mandatory:"true" json:"type"`
-	Subject    *string                      `mandatory:"false" json:"subject"`
-	BufferSize *int                         `mandatory:"false" json:"buffersize"`
-	ErrorLog   *log.Logger                  `mandatory:"false"`
+
+	// Configuration provider for initializing logging ingestion client.
+	Provider common.ConfigurationProvider `mandatory:"true" json:"provider"`
+
+	// OCID of OCI Logging Log to send data to.
+	LogId *string `mandatory:"true" json:"logId"`
+
+	// OCI Logging Log fields
+	Source  *string `mandatory:"true" json:"source"`
+	Type    *string `mandatory:"true" json:"type"`
+	Subject *string `mandatory:"false" json:"subject"`
+
+	// Buffer for logging ingestion Log Entry. Enables non-blocking writes to log.
+	// Default set to 200.
+	BufferSize *int `mandatory:"false" json:"buffersize"`
+
+	// Queue file location for storing failed log entries. A temp queue file is
+	// created in the system temp location if left empty. LogWriter will
+	// periodically attempt to write logs to OCI Logging Log.
+	QueueFile *string `mandatory:"false" json:"queuefile"`
+
+	// Logger to write error messages and critical info to.
+	Logger *log.Logger `mandatory:"false"`
 }
 
-// NewOCILogWriter returns a pointer to the LogWriter or an error
+// NewOCILogWriter returns a pointer to the LogWriter or an error. Use
+// OCILogWriterDetails to define OCILogWriter behavior.
 func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
-	// Create a temporary file for the queue
-	queueFile, err := os.CreateTemp("", "oci-log-queue-")
-	if err != nil {
-		return nil, err
-	}
 
 	// Validate LogWriterDetails
 	if cfg.LogId == nil || *cfg.LogId == "" {
@@ -95,8 +106,23 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 		// Minimum buffer size
 		cfg.BufferSize = common.Int(2)
 	}
-	if cfg.ErrorLog == nil {
-		cfg.ErrorLog = log.New(os.Stderr, "oci-logger-error: ", log.LstdFlags|log.LUTC)
+	if cfg.Logger == nil {
+		cfg.Logger = log.New(os.Stderr, "oci-logger-error: ", log.LstdFlags|log.LUTC)
+	}
+
+	var queueFile *os.File
+	var err error
+	if cfg.QueueFile == nil {
+		// Create a temporary file for the queue
+		queueFile, err = os.CreateTemp("", "oci-log-queue-")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		queueFile, err = os.Open(*cfg.QueueFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// provider can be user, instance, workload, or resource principal for flexibility
@@ -112,7 +138,7 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 		Source:    cfg.Source,
 		Subject:   cfg.Subject,
 		Type:      cfg.Type,
-		log:       cfg.ErrorLog,
+		log:       cfg.Logger,
 		queueFile: queueFile,
 		closed:    false,
 		done:      make(chan bool),
@@ -157,10 +183,11 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 		return 0, ErrLogEntrySize
 	}
 
-	// Write to in-memory buffer
 	select {
+	// Write to in-memory buffer
 	case lw.buffer <- le:
 	default:
+		// Failover to queue file write
 		lw.fileMux.Lock()
 		defer lw.fileMux.Unlock()
 		// If buffer is full, write directly to queue file
@@ -269,6 +296,8 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 			if err != nil {
 				lw.log.Printf("error processing queue file: %s\n", err)
 			}
+
+			lw.queueFile.Close()
 
 			flushed <- true
 			return

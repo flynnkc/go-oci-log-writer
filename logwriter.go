@@ -17,14 +17,12 @@ import (
 )
 
 var (
-	ErrNoLogId       = errors.New("error Log ID not specified")
-	ErrNoLogSource   = errors.New("error Log Source not specified")
-	ErrNoLogType     = errors.New("error Log Type not specified")
-	ErrInvalidWorker = errors.New("error WorkerCount need to be 1 or greater")
-	ErrLogEntrySize  = errors.New("error log entry greater than 1 megabyte")
-	ErrClosed        = errors.New("error log writer closed")
-	ErrNot2XX        = errors.New("error non-2XX status code in put log response")
-	logSpecVersion   = common.String("1.0") // Mandatory value per SDK docs
+	ErrNoLogId     = errors.New("error Log ID not specified")
+	ErrNoLogSource = errors.New("error Log Source not specified")
+	ErrNoLogType   = errors.New("error Log Type not specified")
+	ErrClosed      = errors.New("error log writer closed")
+	ErrNot2XX      = errors.New("error non-2XX status code in put log response")
+	logSpecVersion = common.String("1.0") // Mandatory value per SDK docs
 )
 
 const (
@@ -69,10 +67,6 @@ type OCILogWriterDetails struct {
 	// Buffer for logging ingestion Log Entry. Enables non-blocking writes to log.
 	// Default set to 200.
 	BufferSize *int `mandatory:"false" json:"buffersize"`
-
-	// Number of worker goroutines to process log entries concurrently.
-	// Default is 1.
-	WorkerCount *int `mandatory:"false" json:"workercount"`
 
 	// Queue file location for storing failed log entries. A temp queue file is
 	// created in the system temp location if left empty. LogWriter will
@@ -170,8 +164,8 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 
 // Write implements the io.Writer interface. Writes a single log entry with slice
 // of byte p. Uses buffered output to reduce network traffic and API requests.
-// Returns the length of data written and an error for checking. Entries must be
-// less than 1MB.
+// Returns the length of data written and an error for checking. Entries greater than
+// 1MB will have data truncated.
 func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	lw.rwMux.RLock()
 	defer lw.rwMux.RUnlock()
@@ -196,10 +190,11 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	}
 
 	if len(le.String()) > megaByte {
-		return 0, ErrLogEntrySize
+		data := *le.Data
+		data = data[:len(le.String())-megaByte]
+		le.Data = &data
 	}
 
-	// Send entry to buffer for processing
 	lw.buffer <- le
 
 	return len(p), nil

@@ -76,10 +76,6 @@ type OCILogWriterDetails struct {
 	// Default set to 200.
 	BufferSize *int `mandatory:"false" json:"buffersize"`
 
-	// Number of worker goroutines to process log entries concurrently.
-	// Default is 1.
-	WorkerCount *int `mandatory:"false" json:"workercount"`
-
 	// Queue file location for storing failed log entries. A temp queue file is
 	// created in the system temp location if left empty. LogWriter will
 	// periodically attempt to write logs to OCI Logging Log.
@@ -254,7 +250,7 @@ func (lw *OCILogWriter) writeLogsToFile(entries []loggingingestion.LogEntry) {
 // Since sending logs to OCI is a slow network operation, this should happen
 // concurrently with other log processing to prevent blocking.
 func (lw *OCILogWriter) worker(done, flushed chan bool) {
-	entries := make([]loggingingestion.LogEntry, cap(lw.buffer))
+	entries := make([]loggingingestion.LogEntry, 0, cap(lw.buffer))
 
 	flushTicker := time.NewTicker(flushInterval)
 	fileTicker := time.NewTicker(fileInterval)
@@ -269,7 +265,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 					lw.writeLogsToFile(entries)
 				}
-				entries = make([]loggingingestion.LogEntry, cap(lw.buffer))
+				entries = make([]loggingingestion.LogEntry, 0, cap(lw.buffer))
 				flushTicker.Reset(flushInterval)
 			}
 
@@ -280,7 +276,7 @@ func (lw *OCILogWriter) worker(done, flushed chan bool) {
 					lw.log.Printf("error flushing OCI logs: %s\n", err)
 					lw.writeLogsToFile(entries)
 				}
-				entries = make([]loggingingestion.LogEntry, cap(lw.buffer))
+				entries = make([]loggingingestion.LogEntry, 0, cap(lw.buffer))
 			}
 
 		case <-fileTicker.C:

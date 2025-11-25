@@ -42,11 +42,12 @@ type LoggingClient interface {
 // OCILogWriter implements the io.Writer interface for the purposes of sending data
 // to the OCI Logging service.
 type OCILogWriter struct {
-	buffer  chan loggingingestion.LogEntry
-	log     *log.Logger
-	flushed chan bool // Signal worker is finished to parent
-	closed  bool      // Prevent further writes after Close called
-	rwMux   sync.RWMutex
+	buffer     chan loggingingestion.LogEntry
+	log        *log.Logger
+	numWorkers int
+	flushed    chan bool // Signal worker is finished to parent
+	closed     bool      // Prevent further writes after Close called
+	rwMux      sync.RWMutex
 }
 
 // OCILogWriterDetails stores details required for OCI Logging entries. Source,
@@ -139,10 +140,11 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 	}
 
 	lw := OCILogWriter{
-		buffer:  make(chan loggingingestion.LogEntry, *cfg.BufferSize),
-		log:     cfg.Logger,
-		closed:  false,
-		flushed: make(chan bool),
+		buffer:     make(chan loggingingestion.LogEntry, *cfg.BufferSize),
+		numWorkers: *cfg.WorkerCount,
+		log:        cfg.Logger,
+		closed:     false,
+		flushed:    make(chan bool),
 	}
 
 	closer := sync.Once{}
@@ -229,7 +231,10 @@ func (lw *OCILogWriter) Close() error {
 	lw.rwMux.Unlock()
 
 	close(lw.buffer)
-	<-lw.flushed // Wait for logs to finish flushing
+
+	for range lw.numWorkers {
+		<-lw.flushed // Wait for logs to finish flushing
+	}
 
 	return nil
 

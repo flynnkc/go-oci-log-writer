@@ -17,13 +17,12 @@ import (
 )
 
 var (
-	ErrNoLogId      = errors.New("error Log ID not specified")
-	ErrNoLogSource  = errors.New("error Log Source not specified")
-	ErrNoLogType    = errors.New("error Log Type not specified")
-	ErrLogEntrySize = errors.New("error log entry greater than 1 megabyte")
-	ErrClosed       = errors.New("error log writer closed")
-	ErrNot2XX       = errors.New("error non-2XX status code in put log response")
-	logSpecVersion  = common.String("1.0") // Mandatory value per SDK docs
+	ErrNoLogId     = errors.New("error Log ID not specified")
+	ErrNoLogSource = errors.New("error Log Source not specified")
+	ErrNoLogType   = errors.New("error Log Type not specified")
+	ErrClosed      = errors.New("error log writer closed")
+	ErrNot2XX      = errors.New("error non-2XX status code in put log response")
+	logSpecVersion = common.String("1.0") // Mandatory value per SDK docs
 )
 
 const (
@@ -154,8 +153,8 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 
 // Write implements the io.Writer interface. Writes a single log entry with slice
 // of byte p. Uses buffered output to reduce network traffic and API requests.
-// Returns the length of data written and an error for checking. Entries must be
-// less than 1MB.
+// Returns the length of data written and an error for checking. Entries greater than
+// 1MB will have data truncated.
 func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	lw.rwMux.RLock()
 	defer lw.rwMux.RUnlock()
@@ -180,23 +179,12 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	}
 
 	if len(le.String()) > megaByte {
-		return 0, ErrLogEntrySize
+		data := *le.Data
+		data = data[:len(le.String())-megaByte]
+		le.Data = &data
 	}
 
-	select {
-	// Write to in-memory buffer
-	case lw.buffer <- le:
-	default:
-		// Failover to queue file write
-		lw.fileMux.Lock()
-		defer lw.fileMux.Unlock()
-		// If buffer is full, write directly to queue file
-		err = writeLogEntryToFile(lw.queueFile, le)
-		if err != nil {
-			lw.log.Printf("error writing to queue file: %s\n", err)
-			return 0, err
-		}
-	}
+	lw.buffer <- le
 
 	return len(p), nil
 }

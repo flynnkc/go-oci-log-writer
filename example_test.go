@@ -20,10 +20,10 @@ func ExampleOCILogWriter() {
 	logId := os.Getenv("OCI_LOG_ID")
 
 	details := ocilog.OCILogWriterDetails{
-		LogId:    &logId,
+		LogId:    logId,
 		Provider: provider,
-		Source:   common.String("ServerA"),
-		Type:     common.String("Access_Log"),
+		Source:   "ServerA",
+		Type:     "Access_Log",
 	}
 
 	writer, err := ocilog.NewOCILogWriter(details)

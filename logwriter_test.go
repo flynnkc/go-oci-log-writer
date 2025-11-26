@@ -7,7 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +35,8 @@ HZ7iMqihh32R+WsG7AemC/9uniupdiQor8zs1O9n1KGjDbqUEk0hXLS+D0i2FO/O
 mcS2wXH8qr8YvQ==
 -----END PRIVATE KEY-----`
 )
+
+// Mock Objects
 
 type mockLoggingClient struct {
 	mock.Mock
@@ -86,6 +88,7 @@ func (m *mockConfigurationProvider) AuthType() (common.AuthConfig, error) {
 	return args.Get(0).(common.AuthConfig), args.Error(1)
 }
 
+// Tests
 func TestNewOCILogWriter(t *testing.T) {
 	logId := "log id"
 	source := "source"
@@ -110,9 +113,9 @@ func TestNewOCILogWriter(t *testing.T) {
 	t.Run("NewLog=1", func(t *testing.T) {
 		d := OCILogWriterDetails{
 			Provider: provider,
-			LogId:    &logId,
-			Source:   &source,
-			Type:     &logType,
+			LogId:    logId,
+			Source:   source,
+			Type:     logType,
 		}
 
 		_, err := NewOCILogWriter(d)
@@ -123,21 +126,21 @@ func TestNewOCILogWriter(t *testing.T) {
 	t.Run("NewLogId=1", func(t *testing.T) {
 		d := OCILogWriterDetails{
 			Provider: provider,
-			Source:   &source,
-			Type:     &logType,
+			Source:   source,
+			Type:     logType,
 		}
 
 		_, err := NewOCILogWriter(d)
-		assert.Error(t, err, "no error on missing log id")
+		assert.Error(t, err)
 	})
 
 	// Empty Log ID
 	t.Run("NewLogId=2", func(t *testing.T) {
 		d := OCILogWriterDetails{
-			LogId:    common.String(""),
+			LogId:    "",
 			Provider: provider,
-			Source:   &source,
-			Type:     &logType,
+			Source:   source,
+			Type:     logType,
 		}
 
 		_, err := NewOCILogWriter(d)
@@ -148,8 +151,8 @@ func TestNewOCILogWriter(t *testing.T) {
 	t.Run("NewLogSource=1", func(t *testing.T) {
 		d := OCILogWriterDetails{
 			Provider: provider,
-			LogId:    &logId,
-			Type:     &logType,
+			LogId:    logId,
+			Type:     logType,
 		}
 
 		_, err := NewOCILogWriter(d)
@@ -160,8 +163,8 @@ func TestNewOCILogWriter(t *testing.T) {
 	t.Run("NewLogType=1", func(t *testing.T) {
 		d := OCILogWriterDetails{
 			Provider: provider,
-			LogId:    &logId,
-			Source:   &source,
+			LogId:    logId,
+			Source:   source,
 		}
 
 		_, err := NewOCILogWriter(d)
@@ -171,58 +174,17 @@ func TestNewOCILogWriter(t *testing.T) {
 
 func TestWrite(t *testing.T) {
 	writer := OCILogWriter{
-		Client: &mockLoggingClient{},
-		buffer: make(chan loggingingestion.LogEntry, 8),
+		inbox:  make(chan loggingingestion.LogEntry, 8),
 		closed: false,
+		rwMux:  sync.RWMutex{},
 	}
 
 	// Normal write
 	t.Run("Write=Valid", func(t *testing.T) {
 		s := []byte("Write Test 1")
 		p, err := writer.Write(s)
-		assert.Equal(t, len(s), p,
-			"write bytes written does not match data length")
+		assert.Equal(t, len(s), p)
 		assert.NoError(t, err, "error on write")
-	})
-
-	t.Run("Write=TooLarge", func(t *testing.T) {
-		s := make([]byte, megaByte)
-		p, err := writer.Write(s)
-		assert.Equal(t, 0, p, "incorrect bytes written")
-		assert.EqualError(t, err, ErrLogEntrySize.Error())
-	})
-
-	t.Run("Write=File", func(t *testing.T) {
-		queueFile, _ := os.CreateTemp("", "logTest")
-		writer.queueFile = queueFile
-		writer.buffer = make(chan loggingingestion.LogEntry)
-
-		// Block buffer to force file writes
-		go func() {
-			writer.buffer <- loggingingestion.LogEntry{}
-		}()
-
-		totalBytes := 0
-
-		for i := 1; i < 6; i++ {
-			s := fmt.Appendf(nil, "Write Test 3 - %d", i)
-			p, err := writer.Write(s)
-			totalBytes += p
-
-			assert.Equal(t, len(s), p)
-			assert.NoError(t, err)
-		}
-
-		info, err := writer.queueFile.Stat()
-		if err != nil {
-			t.Logf("Write=File: error getting queue file info %s", err)
-		}
-		t.Logf("%d bytes written to file", totalBytes)
-		assert.Greater(t, info.Size(), int64(totalBytes))
-
-		writer.queueFile.Close()
-		os.Remove(writer.queueFile.Name())
-		t.Logf("Cleaned up queue file at %s", writer.queueFile.Name())
 	})
 
 	t.Run("Write=Closed", func(t *testing.T) {
@@ -239,14 +201,13 @@ func TestClose(t *testing.T) {
 	// Normal Close
 	t.Run("Close=Valid", func(t *testing.T) {
 		writer := OCILogWriter{
+			inbox:   make(chan loggingingestion.LogEntry),
 			closed:  false,
-			done:    make(chan bool),
 			flushed: make(chan bool),
 		}
 
 		go func() {
 			time.Sleep(2 * time.Second)
-			<-writer.done
 			writer.flushed <- true
 		}()
 
@@ -258,7 +219,6 @@ func TestClose(t *testing.T) {
 	t.Run("Close=Closed", func(t *testing.T) {
 		writer := OCILogWriter{
 			closed:  true,
-			done:    make(chan bool),
 			flushed: make(chan bool),
 		}
 

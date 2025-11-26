@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,12 +18,13 @@ import (
 )
 
 var (
-	ErrNoLogId     = errors.New("error Log ID not specified")
-	ErrNoLogSource = errors.New("error Log Source not specified")
-	ErrNoLogType   = errors.New("error Log Type not specified")
-	ErrClosed      = errors.New("error log writer closed")
-	ErrNot2XX      = errors.New("error non-2XX status code in put log response")
-	logSpecVersion = common.String("1.0") // Mandatory value per SDK docs
+	ErrNoLogId       = errors.New("error Log ID not specified")
+	ErrNoLogSource   = errors.New("error Log Source not specified")
+	ErrNoLogType     = errors.New("error Log Type not specified")
+	ErrInvalidWorker = errors.New("error WorkerCount need to be 1 or greater")
+	ErrClosed        = errors.New("error log writer closed")
+	ErrNot2XX        = errors.New("error non-2XX status code in put log response")
+	logSpecVersion   = common.String("1.0") // Mandatory value per SDK docs
 )
 
 const (
@@ -37,15 +39,20 @@ type LoggingClient interface {
 	PutLogs(context.Context, loggingingestion.PutLogsRequest) (loggingingestion.PutLogsResponse, error)
 }
 
-// OCILogWriter implements the io.Writer interface for the purposes of sending data
-// to the OCI Logging service.
+// OCILogWriter implements a fan-in/fan-out writer that batches log entries and
+// flushes them via a worker pool. Writes go to a fixed inbox channel. A single
+// aggregator goroutine batches entries (by count) and sends slices to workers.
 type OCILogWriter struct {
-	buffer     chan loggingingestion.LogEntry
-	log        *log.Logger
-	numWorkers int
-	flushed    chan bool // Signal worker is finished to parent
-	closed     bool      // Prevent further writes after Close called
+	inbox      chan loggingingestion.LogEntry   // Fan-in: never swapped, all writes go here
+	batches    chan []loggingingestion.LogEntry // Fan-out: aggregator emits batches here for workers to consume
+	log        *log.Logger                      // Logger for sending any error messages if desired
+	numWorkers int                              // Number of workers processing and sending logs to OCI
+	flushed    chan bool                        // Signal worker is finished to parent
+	closed     bool                             // Prevent further writes after Close called
 	rwMux      sync.RWMutex
+
+	// Batching threshold (number of entries). Updated atomically by UpdateMaxBufferSize.
+	maxBatchEntries int64
 }
 
 // OCILogWriterDetails stores details required for OCI Logging entries. Source,
@@ -64,9 +71,14 @@ type OCILogWriterDetails struct {
 	Type    string `mandatory:"true" json:"type"`
 	Subject string `mandatory:"true" json:"subject"`
 
-	// Buffer for logging ingestion Log Entry. Enables non-blocking writes to log.
-	// Default set to 200.
-	BufferSize *int `mandatory:"false" json:"buffersize"`
+	// MaxBuffer for logging ingestion Log Entry. Enables non-blocking writes to log.
+	// Default set to 50MB. In this implementation, this value controls the initial
+	// batch threshold (entries) and the inbox channel capacity heuristic.
+	MaxBufferSize *int `mandatory:"false" json:"buffersize"`
+
+	// Number of worker goroutines to process log entries concurrently.
+	// Default is 1.
+	WorkerCount *int `mandatory:"false" json:"workercount"`
 
 	// Queue file location for storing failed log entries. A temp queue file is
 	// created in the system temp location if left empty. LogWriter will
@@ -95,11 +107,11 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 	}
 
 	// Default buffer size of 50
-	if cfg.BufferSize == nil {
-		cfg.BufferSize = common.Int(50)
-	} else if *cfg.BufferSize < 2 {
+	if cfg.MaxBufferSize == nil {
+		cfg.MaxBufferSize = common.Int(50)
+	} else if *cfg.MaxBufferSize < 2 {
 		// Minimum buffer size
-		cfg.BufferSize = common.Int(2)
+		cfg.MaxBufferSize = common.Int(2)
 	}
 
 	if cfg.Logger == nil {
@@ -133,15 +145,25 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 		return nil, err
 	}
 
+	// Heuristic: use half of MaxBufferSize as inbox capacity, minimum 2
+	inboxCap := *cfg.MaxBufferSize >> 1
+	if inboxCap < 2 {
+		inboxCap = 2
+	}
+
 	lw := OCILogWriter{
-		buffer:     make(chan loggingingestion.LogEntry, *cfg.BufferSize),
-		numWorkers: *cfg.WorkerCount,
-		log:        cfg.Logger,
-		closed:     false,
-		flushed:    make(chan bool),
+		inbox:           make(chan loggingingestion.LogEntry, inboxCap),
+		batches:         make(chan []loggingingestion.LogEntry, *cfg.WorkerCount),
+		numWorkers:      *cfg.WorkerCount,
+		log:             cfg.Logger,
+		closed:          false,
+		flushed:         make(chan bool),
+		maxBatchEntries: int64(inboxCap), // initial batch threshold
 	}
 
 	closer := sync.Once{}
+
+	lw.startAggregator()
 
 	// Start worker(s)
 	for range *cfg.WorkerCount {
@@ -156,14 +178,14 @@ func NewOCILogWriter(cfg OCILogWriterDetails) (*OCILogWriter, error) {
 			logType:    &cfg.Type,
 		}
 
-		w.run(lw.buffer, lw.flushed, &closer)
+		go w.runBatches(lw.batches, lw.flushed, &closer)
 	}
 
 	return &lw, nil
 }
 
 // Write implements the io.Writer interface. Writes a single log entry with slice
-// of byte p. Uses buffered output to reduce network traffic and API requests.
+// of byte p. Uses buffered inbox to reduce network traffic and API requests.
 // Returns the length of data written and an error for checking. Entries greater than
 // 1MB will have data truncated.
 func (lw *OCILogWriter) Write(p []byte) (int, error) {
@@ -189,29 +211,72 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 		},
 	}
 
+	// Truncate data
 	if len(le.String()) > megaByte {
 		data := *le.Data
 		data = data[:len(le.String())-megaByte]
 		le.Data = &data
 	}
 
-	lw.buffer <- le
+	// Fan-in
+	lw.inbox <- le
 
 	return len(p), nil
 }
 
-func (lw *OCILogWriter) UpdateBufferSize(n int) {
-	go func() {
-		b1 := lw.buffer
-		lw.buffer = make(chan loggingingestion.LogEntry, n)
+// UpdateMaxBufferSize dynamically adjusts the batching threshold (entry count)
+// used by the aggregator. This is an atomic update and does not swap channels
+// or risk data loss. The aggregator will observe the new threshold and start
+// emitting batches accordingly.
+func (lw *OCILogWriter) UpdateMaxBufferSize(n int) {
+	if n < 2 {
+		n = 2
+	}
+	atomic.StoreInt64(&lw.maxBatchEntries, int64(n))
+}
 
-		for entry := range b1 {
-			lw.buffer <- entry
+func (lw *OCILogWriter) getMaxBatchEntries() int {
+	return int(atomic.LoadInt64(&lw.maxBatchEntries))
+}
+
+func (lw *OCILogWriter) startAggregator() {
+	go func() {
+		flushTicker := time.NewTicker(flushInterval)
+		defer flushTicker.Stop()
+		defer close(lw.batches) // signal workers when aggregator finishes
+
+		cur := make([]loggingingestion.LogEntry, 0, lw.getMaxBatchEntries())
+
+		for {
+			select {
+			case e, ok := <-lw.inbox:
+				if !ok {
+					// drain remaining
+					if len(cur) > 0 {
+						lw.emitBatch(&cur)
+					}
+					return
+				}
+				cur = append(cur, e)
+				if len(cur) >= lw.getMaxBatchEntries() {
+					lw.emitBatch(&cur)
+				}
+			case <-flushTicker.C:
+				if len(cur) > 0 {
+					lw.emitBatch(&cur)
+				}
+			}
 		}
 	}()
 }
 
-// Close flushes the buffer and closes the channel. Should be called in the
+func (lw *OCILogWriter) emitBatch(cur *[]loggingingestion.LogEntry) {
+	b := *cur
+	lw.batches <- b
+	*cur = make([]loggingingestion.LogEntry, 0, lw.getMaxBatchEntries())
+}
+
+// Close flushes the buffer and closes the channels. Should be called in the
 // cleanup for an exiting program. Implements io.Closer interface. Close MUST be
 // called from here and from no other function.
 func (lw *OCILogWriter) Close() error {
@@ -225,14 +290,14 @@ func (lw *OCILogWriter) Close() error {
 
 	lw.rwMux.Unlock()
 
-	close(lw.buffer)
+	// Stop aggregator; it will close batches when done
+	close(lw.inbox)
 
 	for range lw.numWorkers {
 		<-lw.flushed // Wait for logs to finish flushing
 	}
 
 	return nil
-
 }
 
 type worker struct {
@@ -247,70 +312,40 @@ type worker struct {
 	fileMux    sync.Mutex
 }
 
-// run processes log entries from the buffer channel, flushing them to OCI Logging
-// when the buffer is full or on a regular interval. It also periodically processes
-// the queue file to retry failed log entries. This method runs as a goroutine and
-// continues until the done channel is closed.
-func (w *worker) run(buffer <-chan loggingingestion.LogEntry, flushed chan bool, closer *sync.Once) {
-	entries := w.makeEntries(cap(buffer))
-
-	flushTicker := time.NewTicker(flushInterval)
+// runBatches processes emitted log entry batches from the batches channel,
+// flushing them to OCI Logging, and periodically processing the queue file.
+// Continues until the batches channel is closed.
+func (w *worker) runBatches(batches <-chan []loggingingestion.LogEntry, flushed chan bool, closer *sync.Once) {
 	fileTicker := time.NewTicker(fileInterval)
+	defer fileTicker.Stop()
 
-process:
 	for {
 		select {
-		// Standard case, read from buffer and write when full
-		case entry, open := <-buffer:
+		case entries, open := <-batches:
 			if !open {
-				break process
+				goto done
+			}
+			if len(entries) == 0 {
+				continue
 			}
 
-			entries = append(entries, entry)
-			if len(entries) >= cap(entries) {
-				err := w.flush(entries)
-				if err != nil {
-					w.log.Printf("error flushing OCI logs: %s\n", err)
-					w.writeLogsToFile(entries)
-				}
-				entries = w.makeEntries(cap(buffer))
-				flushTicker.Reset(flushInterval)
+			if err := w.flush(entries); err != nil {
+				w.log.Printf("error flushing OCI logs: %s\n", err)
+				w.writeLogsToFile(entries)
 			}
 
-		// Flush timer
-		case <-flushTicker.C:
-			if len(entries) > 0 {
-				err := w.flush(entries)
-				if err != nil {
-					w.log.Printf("error flushing OCI logs: %s\n", err)
-					w.writeLogsToFile(entries)
-				}
-				entries = w.makeEntries(cap(buffer))
-			}
-
-		// File write timer
 		case <-fileTicker.C:
-			err := w.processQueueFile()
-			if err != nil {
+			if err := w.processQueueFile(); err != nil {
 				w.log.Printf("error processing queue file: %s\n", err)
 			}
 		}
 	}
 
-	// Process remaining entries
-	if len(entries) > 0 {
-		err := w.flush(entries)
-		if err != nil {
-			w.log.Printf("error flushing OCI logs: %s\n", err)
-			w.writeLogsToFile(entries)
-		}
-	}
-
+done:
 	// Only one worker needs to finish processing and close file
 	closer.Do(func() {
 		// Process queue file
-		err := w.processQueueFile()
-		if err != nil {
+		if err := w.processQueueFile(); err != nil {
 			w.log.Printf("error processing queue file: %s\n", err)
 		}
 
@@ -416,8 +451,4 @@ func (w *worker) writeLogEntryToFile(entry loggingingestion.LogEntry) error {
 	}
 	_, err = w.queueFile.Write(append(data, '\n'))
 	return err
-}
-
-func (w *worker) makeEntries(bufCap int) []loggingingestion.LogEntry {
-	return make([]loggingingestion.LogEntry, 0, bufCap/w.numWorkers)
 }

@@ -189,17 +189,6 @@ func (lw *OCILogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (lw *OCILogWriter) UpdateBufferSize(n int) {
-	go func() {
-		b1 := lw.buffer
-		lw.buffer = make(chan loggingingestion.LogEntry, n)
-
-		for entry := range b1 {
-			lw.buffer <- entry
-		}
-	}()
-}
-
 // Close flushes the buffer and closes the channel. Should be called in the
 // cleanup for an exiting program. Implements io.Closer interface. Close MUST be
 // called from here and from no other function.
